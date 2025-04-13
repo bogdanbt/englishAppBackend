@@ -14,7 +14,7 @@ app.use(cookieParser());
 
 app.use(
   cors({
-    origin: "https://englishtarapp.netlify.app/",
+    origin: "https://englishtarapp.netlify.app",
     credentials: true,
   })
 );
