@@ -639,6 +639,43 @@ app.put("/grammar-progress", async (req, res) => {
     });
   }
 });
+app.put("/grammar/:id", async (req, res) => {
+  try {
+    const updated = await Grammar.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+    });
+
+    if (!updated) {
+      return res.status(404).json({ message: "Sentence not found" });
+    }
+
+    res.json({ message: "Sentence updated", updated });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating sentence", error: error.message });
+  }
+});
+app.delete("/grammar/:userId/:courseGrammarName/:lessonGrammarName", async (req, res) => {
+  try {
+    const { userId, courseGrammarName, lessonGrammarName } = req.params;
+    const result = await Grammar.deleteMany({
+      userId,
+      courseGrammarName,
+      lessonGrammarName,
+    });
+
+    // Также удалить прогресс:
+    await GrammarProgress.deleteOne({
+      userId,
+      courseGrammarName,
+      lessonGrammarName,
+    });
+
+    res.json({ message: "Lesson deleted", deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting lesson", error: error.message });
+  }
+});
+
 
 // ======= СТАРТ СЕРВЕРА =======
 const PORT = process.env.PORT || 5000;
