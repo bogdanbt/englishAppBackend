@@ -651,31 +651,64 @@ app.put("/grammar/:id", async (req, res) => {
 
     res.json({ message: "Sentence updated", updated });
   } catch (error) {
-    res.status(500).json({ message: "Error updating sentence", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error updating sentence", error: error.message });
   }
 });
-app.delete("/grammar/:userId/:courseGrammarName/:lessonGrammarName", async (req, res) => {
+app.delete(
+  "/grammar/:userId/:courseGrammarName/:lessonGrammarName",
+  async (req, res) => {
+    try {
+      const { userId, courseGrammarName, lessonGrammarName } = req.params;
+      const result = await Grammar.deleteMany({
+        userId,
+        courseGrammarName,
+        lessonGrammarName,
+      });
+
+      // Также удалить прогресс:
+      await GrammarProgress.deleteOne({
+        userId,
+        courseGrammarName,
+        lessonGrammarName,
+      });
+
+      res.json({
+        message: "Lesson deleted",
+        deletedCount: result.deletedCount,
+      });
+    } catch (error) {
+      res
+        .status(500)
+        .json({ message: "Error deleting lesson", error: error.message });
+    }
+  }
+);
+
+app.delete("/words/:userId/:courseName/:lessonName", async (req, res) => {
   try {
-    const { userId, courseGrammarName, lessonGrammarName } = req.params;
-    const result = await Grammar.deleteMany({
+    const { userId, courseName, lessonName } = req.params;
+    const result = await Word.deleteMany({
       userId,
-      courseGrammarName,
-      lessonGrammarName,
+      courseName,
+      lessonName,
     });
 
-    // Также удалить прогресс:
-    await GrammarProgress.deleteOne({
+    // Также можно удалить LessonProgress:
+    await LessonProgress.deleteOne({
       userId,
-      courseGrammarName,
-      lessonGrammarName,
+      courseName,
+      lessonName,
     });
 
     res.json({ message: "Lesson deleted", deletedCount: result.deletedCount });
   } catch (error) {
-    res.status(500).json({ message: "Error deleting lesson", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error deleting lesson", error: error.message });
   }
 });
-
 
 // ======= СТАРТ СЕРВЕРА =======
 const PORT = process.env.PORT || 5000;
