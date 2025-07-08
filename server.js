@@ -14,7 +14,7 @@ app.use(cookieParser());
 
 app.use(
   cors({
-    origin: "https://englishtarapp.netlify.app",
+    origin: ["http://localhost:3000", "https://englisharapp.netlify.app"],
     credentials: true,
   })
 );
@@ -49,6 +49,7 @@ const wordSchema = new mongoose.Schema({
   courseName: { type: String, required: true }, // Название курса
   lessonName: { type: String, required: true }, // Название урока
   word: { type: String, required: true }, // Слово
+  knowledgeScore: { type: Number, default: 0 },
   translation: { type: String, required: true }, // Перевод
   repeats: { type: Number, default: 0 }, // Количество повторений
 });
@@ -73,8 +74,17 @@ const lessonProgressSchema = new mongoose.Schema({
   lessonName: { type: String, required: true },
   repeats: { type: Number, default: 0 },
 });
-
 const LessonProgress = mongoose.model("LessonProgress", lessonProgressSchema);
+
+// ======= МОДЕЛЬ примеров использования слов =======
+const exampleSchema = new mongoose.Schema({
+  word: { type: String, required: true, unique: true }, // Одно слово
+  examples: { type: [String], required: true }, // Примеры
+  createdAt: { type: Date, default: Date.now },
+});
+
+const WordExample = mongoose.model("WordExample", exampleSchema);
+
 // ======= МОДЕЛЬ ПРОГРЕССА граматики =======
 const grammarProgressSchema = new mongoose.Schema({
   userId: { type: String, required: true },
@@ -473,7 +483,7 @@ app.get("/speak/:word", async (req, res) => {
   try {
     const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
       word
-    )}&tl=en&client=tw-ob`;
+    )}&tl=en-us&client=tw-ob`;
 
     const response = await axios.get(url, {
       responseType: "stream",
@@ -707,6 +717,143 @@ app.delete("/words/:userId/:courseName/:lessonName", async (req, res) => {
     res
       .status(500)
       .json({ message: "Error deleting lesson", error: error.message });
+  }
+});
+
+app.post("/examples", async (req, res) => {
+  const data = req.body;
+  if (!data) return res.status(400).json({ message: "No data provided" });
+
+  const items = Array.isArray(data) ? data : [data];
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const item of items) {
+    if (!item.word || !Array.isArray(item.examples)) {
+      skipped++;
+      continue;
+    }
+
+    try {
+      const existing = await WordExample.findOne({ word: item.word });
+
+      if (existing) {
+        const combined = [...existing.examples, ...item.examples];
+        const uniqueExamples = [...new Set(combined)];
+        if (uniqueExamples.length !== existing.examples.length) {
+          existing.examples = uniqueExamples;
+          await existing.save();
+          updated++;
+        } else {
+          skipped++;
+        }
+      } else {
+        await WordExample.create({
+          word: item.word,
+          examples: [...new Set(item.examples)],
+        });
+        inserted++;
+      }
+    } catch (error) {
+      console.error(`Error processing word "${item.word}":`, error.message);
+      skipped++;
+    }
+  }
+
+  return res.status(200).json({ inserted, updated, skipped });
+});
+
+app.get("/examples/:word", async (req, res) => {
+  try {
+    const example = await WordExample.findOne({ word: req.params.word });
+    if (!example) return res.status(404).json({ message: "Not found" });
+    return res.json(example);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Fetch error", error: error.message });
+  }
+});
+
+app.put("/examples/:word", async (req, res) => {
+  const newExamples = req.body.examples;
+
+  if (!Array.isArray(newExamples)) {
+    return res.status(400).json({ message: "examples must be an array" });
+  }
+
+  try {
+    const entry = await WordExample.findOne({ word: req.params.word });
+    if (!entry) return res.status(404).json({ message: "Word not found" });
+
+    const combined = [...entry.examples, ...newExamples];
+    const uniqueExamples = [...new Set(combined)];
+
+    entry.examples = uniqueExamples;
+    await entry.save();
+
+    return res.json({ message: "Updated", examples: entry.examples });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Update error", error: error.message });
+  }
+});
+// app.post("/knowledge/init", async (req, res) => {
+//   try {
+//     const result = await Word.updateMany(
+//       { knowledgeScore: { $exists: false } },
+//       { $set: { knowledgeScore: 0 } }
+//     );
+//     res.json({
+//       message: "knowledgeScore initialized for all users",
+//       modified: result.modifiedCount,
+//     });
+//   } catch (err) {
+//     res.status(500).json({ error: err.message });
+//   }
+// });
+app.post("/knowledge/increase", async (req, res) => {
+  const { userId, word, courseName } = req.body;
+
+  if (!userId || !word || !courseName) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  try {
+    await Word.updateOne({ userId, courseName, word }, [
+      {
+        $set: {
+          knowledgeScore: {
+            $min: [{ $add: ["$knowledgeScore", 10] }, 50],
+          },
+        },
+      },
+    ]);
+
+    res.json({ message: "Knowledge score increased" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/knowledge/reset", async (req, res) => {
+  const { userId, word, courseName } = req.body;
+
+  if (!userId || !word || !courseName) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  try {
+    await Word.updateOne(
+      { userId, courseName, word },
+      { $set: { knowledgeScore: 10 } }
+    );
+
+    res.json({ message: "Knowledge score reset to 10" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
