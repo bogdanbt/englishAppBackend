@@ -857,6 +857,24 @@ app.post("/knowledge/reset", async (req, res) => {
   }
 });
 
+app.post("/examples/delete-many", async (req, res) => {
+  const { words } = req.body;
+
+  if (!Array.isArray(words) || words.length === 0) {
+    return res.status(400).json({ message: "Invalid or empty word list" });
+  }
+
+  try {
+    const result = await WordExample.deleteMany({ word: { $in: words } });
+    res.json({
+      message: "Examples deleted",
+      deletedCount: result.deletedCount,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Deletion error", error: error.message });
+  }
+});
+
 // ======= СТАРТ СЕРВЕРА =======
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
