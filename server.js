@@ -85,6 +85,25 @@ const exampleSchema = new mongoose.Schema({
 
 const WordExample = mongoose.model("WordExample", exampleSchema);
 
+// ======= МОДЕЛЬ Повтора слов в вокабуляр =======
+const repetitionSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  word: { type: String, required: true },
+  courseName: { type: String, required: true },
+  history: [
+    {
+      date: { type: Date, required: true },
+      status: {
+        type: String,
+        enum: ["new", "intro", "success", "fail"],
+        required: true,
+      },
+    },
+  ],
+});
+repetitionSchema.index({ userId: 1, word: 1, courseName: 1 }, { unique: true });
+const RepetitionProgress = mongoose.model("RepetitionProgress", repetitionSchema);
+
 // ======= МОДЕЛЬ ПРОГРЕССА граматики =======
 const grammarProgressSchema = new mongoose.Schema({
   userId: { type: String, required: true },
@@ -695,6 +714,24 @@ app.delete(
     }
   }
 );
+app.get("/words/:userId/:courseName", async (req, res) => {
+  try {
+    const { userId, courseName } = req.params;
+    const words = await Word.find({ userId, courseName });
+
+    res.status(200).json({
+      success: true,
+      message: "Words loaded for course",
+      data: words,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Error fetching words",
+      error: error.message,
+    });
+  }
+});
 
 app.delete("/words/:userId/:courseName/:lessonName", async (req, res) => {
   try {
@@ -874,6 +911,246 @@ app.post("/examples/delete-many", async (req, res) => {
     res.status(500).json({ message: "Deletion error", error: error.message });
   }
 });
+
+// routes/repetitionRoutes.js
+// app.post("/append-history", async (req, res) => {
+//   const { userId, courseName, word, date, status } = req.body;
+
+//   if (!userId || !courseName || !word || !date || !status) {
+//     return res.status(400).json({ message: "Missing required fields" });
+//   }
+
+//   try {
+//     const updateResult = await RepetitionProgress.updateOne(
+//       { userId, courseName, word },
+//       {
+//         $push: {
+//           history: { date: new Date(date), status },
+//         },
+//       },
+//       { upsert: true }
+//     );
+
+//     res.status(200).json({ message: "History entry added", updateResult });
+//   } catch (err) {
+//     console.error("Error appending to history:", err);
+//     res.status(500).json({ message: "Server error" });
+//   }
+// });
+
+app.post("/append-history", async (req, res) => {
+  const { userId, courseName, word, date, status } = req.body;
+
+  // Проверка обязательных полей
+  if (!userId || !courseName || !word || !date || !status) {
+    return res.status(400).json({ message: "Missing required fields" });
+  }
+
+  try {
+    // Ищем, существует ли уже прогресс по слову
+    const existing = await RepetitionProgress.findOne({ userId, courseName, word });
+
+    if (existing) {
+      // Если есть — просто добавляем запись в history
+      existing.history.push({
+        date: new Date(date),
+        status,
+      });
+      await existing.save();
+    } else {
+      // Если нет — создаём новый документ с history
+      await RepetitionProgress.create({
+        userId,
+        courseName,
+        word,
+        history: [
+          {
+            date: new Date(date),
+            status,
+          },
+        ],
+      });
+    }
+
+    res.status(200).json({ message: "History updated successfully" });
+  } catch (err) {
+    console.error("Error appending to history:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+app.post("/manual-add", async (req, res) => {
+  const { userId, courseName, words } = req.body;
+
+  if (!userId || !courseName || !Array.isArray(words)) {
+    return res.status(400).json({ message: "Invalid input" });
+  }
+
+  try {
+    const bulkOps = words.map(({ word, history }) => ({
+      updateOne: {
+        filter: { userId, courseName, word },
+        update: { $set: { history } },
+        upsert: true,
+      },
+    }));
+
+    if (bulkOps.length > 0) {
+      await RepetitionProgress.bulkWrite(bulkOps);
+    }
+
+    res.status(200).json({ message: "Words added or updated" });
+  } catch (err) {
+    console.error("manual-add failed:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+// app.post("/repetition/update", async (req, res) => {
+//   const { userId, word, courseName, status } = req.body;
+
+//   if (!userId || !word || !courseName || !["new", "intro", "success", "fail"].includes(status)) {
+//     return res.status(400).json({ message: "Missing or invalid fields" });
+//   }
+
+//   try {
+//     const update = await RepetitionProgress.findOneAndUpdate(
+//       { userId, word, courseName },
+//       {
+//         $push: {
+//           history: {
+//             date: new Date(),
+//             status,
+//           },
+//         },
+//       },
+//       { new: true, upsert: true }
+//     );
+
+//     res.json({ message: "Progress updated", progress: update });
+//   } catch (error) {
+//     res.status(500).json({ message: "Error updating progress", error: error.message });
+//   }
+// });
+
+
+//оно есть но не надо его использовать лучше без него 
+app.post("/repetition/init-missing", async (req, res) => {
+  const { userId, courseName } = req.body;
+
+  if (!userId || !courseName) {
+    return res.status(400).json({ message: "Missing required fields" });
+  }
+
+  try {
+    const allWords = await Word.find({ userId, courseName });
+    const existing = await RepetitionProgress.find({ userId, courseName });
+
+    const existingKeys = new Set(
+      existing.map((e) => `${e.word}_${e.courseName}_${e.userId}`)
+    );
+
+    const toInsert = allWords
+      .filter((w) => !existingKeys.has(`${w.word}_${w.courseName}_${userId}`))
+      .map((w) => ({
+        userId,
+        courseName,
+        word: w.word,
+        history: [{ date: new Date(), status: "new" }],
+      }));
+
+    if (toInsert.length > 0) {
+      try {
+        await RepetitionProgress.insertMany(toInsert, { ordered: false });
+      } catch (err) {
+        if (err.code !== 11000) {
+          return res.status(500).json({ message: "Insert error", error: err.message });
+        }
+      }
+    }
+
+    res.json({ inserted: toInsert.length });
+  } catch (error) {
+    res.status(500).json({ message: "Error initializing repetition", error: error.message });
+  }
+});
+
+
+app.get("/repetition/:userId/:courseName", async (req, res) => {
+  const { userId, courseName } = req.params;
+
+  try {
+    const data = await RepetitionProgress.find({ userId, courseName });
+
+    if (!data || data.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No repetition data found for this course",
+        data: [],
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Repetition data loaded",
+      data,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Error fetching repetition data",
+      error: error.message,
+    });
+  }
+});
+
+app.delete("/repetition/:userId/:word", async (req, res) => {
+  const { userId, word } = req.params;
+
+  try {
+    const deleted = await RepetitionProgress.deleteOne({ userId, word });
+    res.json({ message: "Progress deleted", deleted });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting progress", error: error.message });
+  }
+});
+
+
+
+// ✅ Добавь в server.js
+app.post("/translate", async (req, res) => {
+  const { texts } = req.body;
+
+  if (!Array.isArray(texts) || texts.length === 0) {
+    return res.status(400).json({ message: "texts must be a non-empty array" });
+  }
+
+  try {
+    const azureResponse = await axios.post(
+      "https://api.cognitive.microsofttranslator.com/translate?api-version=3.0&to=ru",
+      texts.map((text) => ({ Text: text })),
+      {
+        headers: {
+          "Ocp-Apim-Subscription-Key": process.env.AZURE_TRANSLATE_KEY,
+          "Ocp-Apim-Subscription-Region": process.env.AZURE_REGION,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const translated = azureResponse.data.map((item) =>
+      item.translations[0].text
+    );
+
+    res.json({ translations: translated });
+  } catch (error) {
+    console.error("Azure Translation error:", error.message);
+    res.status(500).json({ message: "Translation failed" });
+  }
+});
+
 
 // ======= СТАРТ СЕРВЕРА =======
 const PORT = process.env.PORT || 5000;
