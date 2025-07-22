@@ -1152,6 +1152,58 @@ app.post("/translate", async (req, res) => {
 });
 
 
+
+const AZURE_KEY = process.env.AZURE_TRANSLATE_KEY;
+const AZURE_REGION = process.env.AZURE_REGION;
+
+const headers = {
+  "Ocp-Apim-Subscription-Key": AZURE_KEY,
+  "Ocp-Apim-Subscription-Region": AZURE_REGION,
+  "Content-Type": "application/json",
+};
+
+app.post("/word-examples-translate", async (req, res) => {
+  const { word } = req.body;
+
+  if (!word) {
+    return res.status(400).json({ message: "Missing word" });
+  }
+
+  try {
+    // 1. Lookup — получаем переводы
+    const lookupRes = await axios.post(
+      "https://api.cognitive.microsofttranslator.com/dictionary/lookup?api-version=3.0&from=en&to=ru",
+      [{ Text: word }],
+      { headers }
+    );
+
+    const topTranslations = lookupRes.data?.[0]?.translations
+      ?.sort((a, b) => b.confidence - a.confidence)
+      ?.slice(0, 4)
+      ?.map((t) => t.normalizedTarget);
+
+    if (!topTranslations || topTranslations.length === 0) {
+      return res.status(404).json({ message: "No translations found" });
+    }
+
+    // 2. Examples — получаем предложения
+    const examplesRes = await axios.post(
+      "https://api.cognitive.microsofttranslator.com/dictionary/examples?api-version=3.0&from=en&to=ru",
+      topTranslations.map((t) => ({ Text: word, Translation: t })),
+      { headers }
+    );
+
+    const examples = examplesRes.data
+      .flatMap((item) => item.examples || [])
+      .slice(0, 3);
+
+    return res.json({ examples });
+  } catch (err) {
+    console.error("Word examples error:", err.message);
+    return res.status(500).json({ message: "Failed to load word examples" });
+  }
+});
+
 // ======= СТАРТ СЕРВЕРА =======
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
