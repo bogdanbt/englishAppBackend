@@ -84,6 +84,58 @@ const exampleSchema = new mongoose.Schema({
 });
 
 const WordExample = mongoose.model("WordExample", exampleSchema);
+// ======= МОДЕЛЬ "карточка слова" (MVP) =======
+const wordCardSchema = new mongoose.Schema(
+  {
+    wordKey: { type: String, required: true, index: true }, // normalized/lemma
+    level: { type: String, default: "B1" },
+    pos: { type: String },
+
+    definition_en: { type: String, default: "" },
+    usage_en: { type: [String], default: [] },
+    collocations_en: { type: [String], default: [] },
+
+    // IMPORTANT: examples as objects (not strings) so we can extend later
+    examples: {
+      type: [
+        {
+          id: { type: String, required: true },
+          en: { type: String, required: true },
+          translations: {
+            ru: { type: String },
+            ua: { type: String },
+          },
+        },
+      ],
+      default: [],
+    },
+
+    // word translation / definition etc for targetLang if you want (MVP keeps it inside examples)
+    translations: {
+      ru: {
+        word: { type: [String], default: [] },
+        definition: { type: String, default: "" },
+        usage: { type: [String], default: [] },
+      },
+      ua: {
+        word: { type: [String], default: [] },
+        definition: { type: String, default: "" },
+        usage: { type: [String], default: [] },
+      },
+    },
+
+    source: {
+      provider: { type: String, default: "chat" },
+      model: { type: String, default: "gpt-5-mini" },
+    },
+  },
+  { timestamps: true }
+);
+
+// уникальность по wordKey + level (для MVP достаточно)
+wordCardSchema.index({ wordKey: 1, level: 1 }, { unique: true });
+
+const WordCard = mongoose.model("WordCard", wordCardSchema);
 
 // ======= МОДЕЛЬ Повтора слов в вокабуляр =======
 const repetitionSchema = new mongoose.Schema({
@@ -131,6 +183,17 @@ const generateRefreshToken = (user) => {
   return jwt.sign({ userId: user.id }, process.env.REFRESH_SECRET, {
     expiresIn: "14d",
   });
+};
+
+
+// ======= HELPERS =======
+const normalizeWord = (raw) => {
+  if (!raw) return "";
+  return String(raw)
+    .trim()
+    .toLowerCase()
+    // remove punctuation around word, keep inner apostrophes/hyphens
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, "");
 };
 
 // ======= РЕГИСТРАЦИЯ =======
@@ -851,6 +914,141 @@ app.put("/examples/:word", async (req, res) => {
 //     res.status(500).json({ error: err.message });
 //   }
 // });
+
+// ======= RESOLVE WORD CARD (MVP) =======
+// body: { word: "bill", targetLang: "ru"|"ua", levelHint?: "B1" }
+app.post("/word-card/resolve", async (req, res) => {
+  const { word, targetLang = "ru", levelHint = "B1" } = req.body || {};
+
+  const wordKey = normalizeWord(word);
+  if (!wordKey) return res.status(400).json({ message: "word is required" });
+
+  try {
+    // 1) cache
+    let card = await WordCard.findOne({ wordKey, level: levelHint });
+
+    // if we already have examples and translations for that lang, return
+    if (
+      card &&
+      card.examples?.length >= 3 &&
+      card.examples.every((e) => e.en && (targetLang === "en" || e.translations?.[targetLang]))
+    ) {
+      return res.json(card);
+    }
+
+    // 2) generate via Chat (MVP: you must set OPENAI_API_KEY)
+    const generated = await generateWordCardWithChat({
+      word: wordKey,
+      targetLang,
+      levelHint,
+    });
+
+    // 3) upsert
+    if (!card) {
+      card = await WordCard.create(generated);
+    } else {
+      // merge minimal: replace for MVP (later can do smarter merge)
+      card.definition_en = generated.definition_en;
+      card.usage_en = generated.usage_en;
+      card.collocations_en = generated.collocations_en;
+      card.examples = generated.examples;
+      card.translations = {
+        ...card.translations,
+        ...generated.translations,
+      };
+      card.source = generated.source;
+      await card.save();
+    }
+
+    return res.json(card);
+  } catch (err) {
+    console.error("word-card/resolve error:", err?.response?.data || err.message);
+    return res.status(500).json({ message: "Failed to resolve word card" });
+  }
+});
+
+// ======= Chat generator (MVP) =======
+async function generateWordCardWithChat({ word, targetLang, levelHint }) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is missing in .env");
+  }
+
+  // IMPORTANT: keep it short to be cheap + B1 vocabulary.
+  const prompt = `
+Return ONLY valid JSON, no markdown.
+Create a learner card for the English word: "${word}".
+Level: ${levelHint}. Use ONLY everyday words up to this level.
+Rules:
+- Provide 3 to 5 short real-life examples (max 12-14 words).
+- EACH example MUST contain the exact word "${word}" (case-insensitive).
+- Avoid advanced C1/C2 vocabulary.
+- Meaning should be the most common everyday meaning.
+
+JSON schema:
+{
+  "wordKey": string,
+  "level": string,
+  "pos": string,
+  "definition_en": string,
+  "usage_en": string[],
+  "collocations_en": string[],
+  "examples": [
+    { "id": string, "en": string, "translations": { "${targetLang}": string } }
+  ],
+  "translations": {
+    "${targetLang}": { "word": string[], "definition": string, "usage": string[] }
+  }
+}
+`;
+
+  const resp = await axios.post(
+    "https://api.openai.com/v1/responses",
+    {
+      model: "gpt-5-mini",
+      input: prompt,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  // Extract text output (best-effort)
+  const text =
+    resp.data?.output?.[0]?.content?.find((c) => c.type === "output_text")?.text ||
+    resp.data?.output_text ||
+    "";
+
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // very small fallback: try to locate JSON object
+    const m = text.match(/\{[\s\S]*\}$/);
+    if (!m) throw new Error("LLM did not return JSON");
+    json = JSON.parse(m[0]);
+  }
+
+  // minimal sanitation
+  json.wordKey = normalizeWord(json.wordKey || word);
+  json.level = json.level || levelHint;
+
+  // ensure ids
+  if (Array.isArray(json.examples)) {
+    json.examples = json.examples.map((e, idx) => ({
+      id: e.id || `${json.wordKey}-${idx + 1}`,
+      en: String(e.en || ""),
+      translations: e.translations || {},
+    }));
+  }
+
+  json.source = { provider: "chat", model: "gpt-5-mini" };
+  return json;
+}
+
 app.post("/knowledge/increase", async (req, res) => {
   const { userId, word, courseName } = req.body;
 
