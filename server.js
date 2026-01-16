@@ -1,4 +1,7 @@
+
 require("dotenv").config();
+const OpenAI = require("openai");
+
 const express = require("express");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
@@ -118,6 +121,150 @@ const GrammarProgress = mongoose.model(
 );
 
 const Word = mongoose.model("Word", wordSchema);
+
+
+// ===== AI ENRICHMENT FOR VOCABULARY WORDS =====
+
+const WordAiEnrichmentSchema = new mongoose.Schema(
+  {
+    userId: {
+  type: String,
+  required: true,
+  index: true,
+},
+
+    wordId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      index: true,
+    },
+
+    word: {
+      type: String,
+      required: true,
+    },
+
+    status: {
+      type: String,
+      enum: ["missing", "processing", "ready", "failed"],
+      default: "missing",
+      index: true,
+    },
+
+    translations: [
+      {
+        ru: String,
+        label_en: String,
+        primary: Boolean,
+      },
+    ],
+
+    usage_en: String,
+    usage_ru: String,
+
+    examples: [
+      {
+        en: String,
+        ru: String,
+      },
+    ],
+
+    model: {
+      type: String,
+      default: "gpt-4.1-mini",
+    },
+
+    promptVersion: {
+      type: String,
+      default: "v1",
+    },
+
+    constraints: {
+      example_level: {
+        type: String,
+        default: "B1",
+      },
+    },
+    openaiCalls: { type: Number, default: 0 },
+lastCallAt: { type: Date, default: null },
+
+
+    error: String,
+  },
+  { timestamps: true }
+);
+
+// ❗ защита от дублей
+WordAiEnrichmentSchema.index(
+  { userId: 1, wordId: 1 },
+  { unique: true }
+);
+
+const WordAiEnrichment = mongoose.model(
+  "WordAiEnrichment",
+  WordAiEnrichmentSchema
+);
+
+
+
+//  переделать потом под разные языки перевода сейчас только английский русский
+
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+async function enrichWordWithOpenAI(word) {
+  const response = await openai.responses.create({
+    model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+    input: `
+You are an English learning assistant.
+
+For the word "${word}", return STRICT JSON with:
+- 1–3 Russian translations (simple, common)
+- short usage explanation in SIMPLE English (B1 level)
+- Russian translation of that explanation
+- 3–4 short example sentences in English (B1 level or simpler),
+  where ALL words except "${word}" are simple/common.
+- Russian translations for each example.
+
+Rules:
+- Keep everything short.
+- No advanced vocabulary.
+- JSON only. No comments. No markdown.
+
+JSON format:
+{
+  "word": "...",
+  "translations": [
+    { "ru": "...", "label_en": "...", "primary": true }
+  ],
+  "usage_en": "...",
+  "usage_ru": "...",
+  "examples": [
+    { "en": "...", "ru": "..." }
+  ]
+}
+    `,
+  });
+
+  const text = response.output_text;
+  const parsed = JSON.parse(text);
+
+  if (
+    !parsed.translations?.length ||
+    !parsed.usage_en ||
+    !parsed.usage_ru ||
+    !parsed.examples?.length
+  ) {
+    throw new Error("Invalid AI response structure");
+  }
+
+  return parsed;
+}
+// конец хелпера аи 
+
+
 // ======= ГЕНЕРАЦИЯ ТОКЕНОВ =======
 const generateAccessToken = (user) => {
   return jwt.sign(
@@ -126,6 +273,8 @@ const generateAccessToken = (user) => {
     { expiresIn: "15m" }
   );
 };
+
+
 
 const generateRefreshToken = (user) => {
   return jwt.sign({ userId: user.id }, process.env.REFRESH_SECRET, {
@@ -282,6 +431,136 @@ app.get("/protected", authMiddleware, (req, res) => {
 //       .json({ message: "Error adding word", error: error.message });
 //   }
 // });
+
+
+
+
+// ===== AI WORD ENRICHMENT ENDPOINT =====
+
+app.get("/ai/enrich-word/:wordId", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { wordId } = req.params;
+
+    const enrichment = await WordAiEnrichment.findOne({ userId, wordId });
+    if (!enrichment) return res.status(404).json({ status: "missing" });
+
+    return res.json(enrichment);
+  } catch (err) {
+    console.error("AI enrich GET error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+app.post("/ai/enrich-word", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { wordId, force = false } = req.body;
+
+    if (!wordId) return res.status(400).json({ error: "wordId is required" });
+
+    const wordDoc = await Word.findOne({ _id: wordId, userId });
+    if (!wordDoc) return res.status(404).json({ error: "Word not found" });
+
+    // 1) Быстрые возвраты (дешево)
+    const existing = await WordAiEnrichment.findOne({ userId, wordId });
+
+    if (existing?.status === "ready" && !force) {
+      return res.json(existing);
+    }
+    if (existing?.status === "processing") {
+      return res.status(202).json({ status: "processing" });
+    }
+
+    // 2) Claim: ровно один запрос может перевести в processing
+    // Важно: upsert + фильтр по статусам => конкурент либо не матчится, либо ловит E11000.
+    let claimed;
+    try {
+      claimed = await WordAiEnrichment.findOneAndUpdate(
+        {
+          userId,
+          wordId,
+          $or: force
+            ? [{ status: { $in: ["missing", "failed", "ready"] } }, { status: { $exists: false } }]
+            : [{ status: { $in: ["missing", "failed"] } }, { status: { $exists: false } }],
+        },
+        {
+          $setOnInsert: {
+            userId,
+            wordId,
+            word: wordDoc.word,
+            model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+            promptVersion: "v1",
+            constraints: { example_level: "B1" },
+          },
+          $set: {
+            word: wordDoc.word,
+            status: "processing",
+            error: null,
+          },
+        },
+        { upsert: true, new: true }
+      );
+    } catch (e) {
+      // Если конкурент успел вставить (unique index), мы просто читаем и возвращаем processing/ready
+      if (e?.code === 11000) {
+        const now = await WordAiEnrichment.findOne({ userId, wordId });
+        if (now?.status === "ready") return res.json(now);
+        return res.status(202).json({ status: "processing" });
+      }
+      throw e;
+    }
+
+    // Если мы не "claimed" (редко), просто вернем processing
+    if (!claimed || claimed.status === "processing") {
+      // 3) Единственный владелец lock вызывает OpenAI
+      await WordAiEnrichment.updateOne(
+        { userId, wordId },
+        { $inc: { openaiCalls: 1 }, $set: { lastCallAt: new Date() } }
+      );
+
+      const aiData = await enrichWordWithOpenAI(wordDoc.word);
+
+      const updated = await WordAiEnrichment.findOneAndUpdate(
+        { userId, wordId },
+        {
+          $set: {
+            translations: aiData.translations,
+            usage_en: aiData.usage_en,
+            usage_ru: aiData.usage_ru,
+            examples: aiData.examples,
+            status: "ready",
+            error: null,
+          },
+        },
+        { new: true }
+      );
+
+      return res.json(updated);
+    }
+
+    // fallback
+    return res.status(202).json({ status: "processing" });
+  } catch (err) {
+    console.error("AI enrich error:", err);
+
+    // На всякий: если уже есть док — пометим failed
+    try {
+      const userId = req.user?.userId;
+      const { wordId } = req.body || {};
+      if (userId && wordId) {
+        await WordAiEnrichment.findOneAndUpdate(
+          { userId, wordId },
+          { $set: { status: "failed", error: err.message } },
+          { new: true }
+        );
+      }
+    } catch {}
+
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
 
 app.post("/words", async (req, res) => {
   try {
