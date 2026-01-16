@@ -442,7 +442,12 @@ app.get("/ai/enrich-word/:wordId", authMiddleware, async (req, res) => {
     const userId = req.user.userId;
     const { wordId } = req.params;
 
-    const enrichment = await WordAiEnrichment.findOne({ userId, wordId });
+    if (!mongoose.Types.ObjectId.isValid(wordId)) {
+      return res.status(400).json({ error: "Invalid wordId" });
+    }
+    const oid = new mongoose.Types.ObjectId(wordId);
+
+    const enrichment = await WordAiEnrichment.findOne({ userId, wordId: oid });
     if (!enrichment) return res.status(404).json({ status: "missing" });
 
     return res.json(enrichment);
@@ -452,113 +457,88 @@ app.get("/ai/enrich-word/:wordId", authMiddleware, async (req, res) => {
   }
 });
 app.post("/ai/enrich-word", authMiddleware, async (req, res) => {
+  const userId = req.user.userId;
+  const { wordId } = req.body || {};
+
+  // 0) валидация входа (чтобы не было CastError -> 500)
+  if (!wordId) return res.status(400).json({ error: "wordId required" });
+  if (!mongoose.Types.ObjectId.isValid(wordId)) {
+    return res.status(400).json({ error: "Invalid wordId" });
+  }
+  const oid = new mongoose.Types.ObjectId(wordId);
+
   try {
-    const userId = req.user.userId;
-    const { wordId, force = false } = req.body;
-
-    if (!wordId) return res.status(400).json({ error: "wordId is required" });
-
-    const wordDoc = await Word.findOne({ _id: wordId, userId });
+    // 1) проверить, что слово вообще существует у этого пользователя
+    const wordDoc = await Word.findOne({ _id: oid, userId }).lean();
     if (!wordDoc) return res.status(404).json({ error: "Word not found" });
 
-    // 1) Быстрые возвраты (дешево)
-    const existing = await WordAiEnrichment.findOne({ userId, wordId });
+    // 2) если уже готово — вернуть сразу (0 платных вызовов)
+    const existing = await WordAiEnrichment.findOne({ userId, wordId: oid });
+    if (existing?.status === "ready") return res.json(existing);
 
-    if (existing?.status === "ready" && !force) {
-      return res.json(existing);
-    }
-    if (existing?.status === "processing") {
-      return res.status(202).json({ status: "processing" });
-    }
-
-    // 2) Claim: ровно один запрос может перевести в processing
-    // Важно: upsert + фильтр по статусам => конкурент либо не матчится, либо ловит E11000.
-    let claimed;
+    // 3) атомарно "захватить" генерацию: только один запрос становится владельцем
+    //    - если уже processing -> этот запрос не владелец и вернёт 202
+    let claimed = null;
     try {
       claimed = await WordAiEnrichment.findOneAndUpdate(
+        { userId, wordId: oid, status: { $ne: "processing" } },
         {
-          userId,
-          wordId,
-          $or: force
-            ? [{ status: { $in: ["missing", "failed", "ready"] } }, { status: { $exists: false } }]
-            : [{ status: { $in: ["missing", "failed"] } }, { status: { $exists: false } }],
-        },
-        {
-          $setOnInsert: {
-            userId,
-            wordId,
-            word: wordDoc.word,
-            model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-            promptVersion: "v1",
-            constraints: { example_level: "B1" },
-          },
-          $set: {
-            word: wordDoc.word,
-            status: "processing",
-            error: null,
-          },
-        },
-        { upsert: true, new: true }
+  $setOnInsert: { userId, wordId: oid, word: wordDoc.word },
+  $set: { status: "processing", error: null, lastCallAt: new Date() },
+  $inc: { openaiCalls: 1 },
+},
+
+        { new: true, upsert: true }
       );
     } catch (e) {
-      // Если конкурент успел вставить (unique index), мы просто читаем и возвращаем processing/ready
+      // если гонка на upsert/unique index — не владелец
       if (e?.code === 11000) {
-        const now = await WordAiEnrichment.findOne({ userId, wordId });
-        if (now?.status === "ready") return res.json(now);
         return res.status(202).json({ status: "processing" });
       }
       throw e;
     }
 
-    // Если мы не "claimed" (редко), просто вернем processing
-    if (!claimed || claimed.status === "processing") {
-      // 3) Единственный владелец lock вызывает OpenAI
-      await WordAiEnrichment.updateOne(
-        { userId, wordId },
-        { $inc: { openaiCalls: 1 }, $set: { lastCallAt: new Date() } }
-      );
-
-      const aiData = await enrichWordWithOpenAI(wordDoc.word);
-
-      const updated = await WordAiEnrichment.findOneAndUpdate(
-        { userId, wordId },
-        {
-          $set: {
-            translations: aiData.translations,
-            usage_en: aiData.usage_en,
-            usage_ru: aiData.usage_ru,
-            examples: aiData.examples,
-            status: "ready",
-            error: null,
-          },
-        },
-        { new: true }
-      );
-
-      return res.json(updated);
+    // если doc уже был processing — мы не владелец, просто скажем "processing"
+    if (!claimed || claimed.status !== "processing") {
+      return res.status(202).json({ status: "processing" });
     }
 
-    // fallback
-    return res.status(202).json({ status: "processing" });
-  } catch (err) {
-    console.error("AI enrich error:", err);
+    // 4) мы владелец -> единственный платный вызов
+    const aiData = await enrichWordWithOpenAI(wordDoc.word);
 
-    // На всякий: если уже есть док — пометим failed
+    // 5) сохранить результат
+    const updated = await WordAiEnrichment.findOneAndUpdate(
+      { userId, wordId: oid },
+      {
+        $set: {
+          translations: aiData.translations || [],
+          usage_en: aiData.usage_en || "",
+          usage_ru: aiData.usage_ru || "",
+          examples: aiData.examples || [],
+          status: "ready",
+          error: null,
+        },
+      },
+      { new: true }
+    );
+
+    return res.json(updated);
+  } catch (err) {
+    console.error("AI enrich POST error:", err);
+
+    // пометить failed (но аккуратно, без CastError)
     try {
-      const userId = req.user?.userId;
-      const { wordId } = req.body || {};
-      if (userId && wordId) {
-        await WordAiEnrichment.findOneAndUpdate(
-          { userId, wordId },
-          { $set: { status: "failed", error: err.message } },
-          { new: true }
-        );
-      }
+      await WordAiEnrichment.findOneAndUpdate(
+        { userId, wordId: oid },
+        { $set: { status: "failed", error: err?.message || "Enrichment failed" } },
+        { new: true }
+      );
     } catch {}
 
-    res.status(500).json({ error: "Server error" });
+    return res.status(500).json({ error: "Server error" });
   }
 });
+
 
 
 
@@ -641,20 +621,18 @@ app.post("/load-defaults", async (req, res) => {
       return res.status(404).json({ message: "No default words found" });
     }
 
-    const userWords = defaultWords.map((word) => ({
-      id: uuidv4(), // Генерируем UUID для каждого слова
-      userId,
-      courseName: word.courseName,
-      lessonName: word.lessonName,
-      word: word.word,
-      translation: word.translation,
-      repeats: 0,
-    }));
+   const userWords = defaultWords.map((w) => ({
+  userId,
+  courseName: w.courseName,
+  lessonName: w.lessonName,
+  word: w.word,
+  translation: w.translation,
+  repeats: 0,
+}));
 
-    await Word.insertMany(userWords);
-    res
-      .status(201)
-      .json({ message: "Courses and words loaded", words: userWords });
+const inserted = await Word.insertMany(userWords);
+res.status(201).json({ message: "Courses and words loaded", words: inserted });
+
   } catch (error) {
     res
       .status(500)
