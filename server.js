@@ -125,13 +125,14 @@ const Word = mongoose.model("Word", wordSchema);
 
 // ===== AI ENRICHMENT FOR VOCABULARY WORDS =====
 
+
 const WordAiEnrichmentSchema = new mongoose.Schema(
   {
     userId: {
-  type: String,
-  required: true,
-  index: true,
-},
+      type: String,
+      required: true,
+      index: true,
+    },
 
     wordId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -162,10 +163,35 @@ const WordAiEnrichmentSchema = new mongoose.Schema(
     usage_en: String,
     usage_ru: String,
 
+    // ✅ главное изменение: добавили target (форма слова как в примере)
     examples: [
       {
         en: String,
         ru: String,
+        target: String, // e.g. "denies", "denied", "went"
+      },
+    ],
+
+    // ✅ опционально: только если AI реально дал полезные формы
+    // (для обычных слов может быть пусто)
+    forms: [
+      {
+        form: String,    // e.g. "went"
+        note_ru: String, // e.g. "прошедшая форма от go"
+      },
+    ],
+
+    // ✅ опционально: только если есть типичная ошибка/неподходящий контекст
+    avoid_ru: {
+      type: String,
+      default: null,
+    },
+
+    // ✅ опционально: 0–2 близких слова с коротким отличием
+    near_synonyms: [
+      {
+        word: String,    // e.g. "refuse"
+        note_ru: String, // e.g. "refuse — отказать; deny — отрицать факт"
       },
     ],
 
@@ -176,7 +202,7 @@ const WordAiEnrichmentSchema = new mongoose.Schema(
 
     promptVersion: {
       type: String,
-      default: "v1",
+      default: "v2", // ✅ обнови версию, чтобы отличать старые записи
     },
 
     constraints: {
@@ -185,9 +211,9 @@ const WordAiEnrichmentSchema = new mongoose.Schema(
         default: "B1",
       },
     },
-    openaiCalls: { type: Number, default: 0 },
-lastCallAt: { type: Date, default: null },
 
+    openaiCalls: { type: Number, default: 0 },
+    lastCallAt: { type: Date, default: null },
 
     error: String,
   },
@@ -218,47 +244,136 @@ async function enrichWordWithOpenAI(word) {
   const response = await openai.responses.create({
     model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
     input: `
-You are an English learning assistant.
+You are helping a Russian-speaking learner master English vocabulary for real workplace usage (office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
 
-For the word "${word}", return STRICT JSON with:
-- 1–3 Russian translations (simple, common)
-- short usage explanation in SIMPLE English (B1 level)
-- Russian translation of that explanation
-- 3–4 short example sentences in English (B1 level or simpler),
-  where ALL words except "${word}" are simple/common.
-- Russian translations for each example.
+Return STRICT JSON only for the base word: "${word}"
 
-Rules:
-- Keep everything short.
-- No advanced vocabulary.
-- JSON only. No comments. No markdown.
+HARD REQUIREMENTS:
+1) translations: 1–3 Russian translations. One must be primary=true. Use label_en like "common" or "formal" (short).
+2) usage_en: 1 short sentence in simple English (B1) describing when to use it.
+3) usage_ru: Russian version of usage_en (1 short sentence).
+4) examples: Provide 3 short examples. Workplace tone, but not jargon-heavy.
+   Each example must include:
+   - en
+   - ru
+   - target: the exact word form used in the sentence (may differ from "${word}")
+   The target must appear exactly once in "en".
 
-JSON format:
+OPTIONAL (only if truly helpful; otherwise use null or empty array):
+- avoid_ru: when NOT to use it / typical confusion.
+- near_synonyms: 0–2 similar words with short difference in Russian.
+- forms: only non-obvious forms that matter (e.g., go→went; deny→denies). Otherwise [].
+
+Style:
+- Prefer shorter sentences, but clarity beats shortness.
+- No markdown.
+- JSON only.
+
+JSON FORMAT:
 {
-  "word": "...",
+  "word": "${word}",
   "translations": [
-    { "ru": "...", "label_en": "...", "primary": true }
+    { "ru": "...", "label_en": "common", "primary": true }
   ],
   "usage_en": "...",
   "usage_ru": "...",
   "examples": [
-    { "en": "...", "ru": "..." }
-  ]
+    { "en": "...", "ru": "...", "target": "..." }
+  ],
+  "avoid_ru": null,
+  "near_synonyms": [],
+  "forms": []
 }
-    `,
+`,
+
+//     input: `
+// You are helping a Russian-speaking learner master English vocabulary for real workplace usage (office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
+
+// Return STRICT JSON only for the base word: "${word}"
+
+// HARD REQUIREMENTS:
+// - Provide 3 examples.
+// - Each example must include:
+//   - "en" short and natural
+//   - "ru" translation
+//   - "target": the exact word form used in the sentence (may differ from "${word}")
+//   - The target must appear exactly once in "en".
+// - Provide "usage_ru": when to use this word (1–2 short sentences in Russian).
+
+// OPTIONAL (only if truly helpful, otherwise use null or empty array):
+// - "avoid_ru": when NOT to use it / typical wrong situation (only if a common confusion exists).
+// - "near_synonyms": 0–2 similar words with short difference in Russian (only if it prevents confusion).
+// - "forms": list ONLY non-obvious forms that matter for this word (e.g., irregular past like go→went; or denies vs deny; otherwise empty).
+
+// Style:
+// - Examples should sound like normal work conversation, but not jargon-heavy.
+// - Prefer shorter sentences, but clarity beats shortness.
+// - No markdown.
+
+// JSON FORMAT:
+// {
+//   "word": "${word}",
+//   "usage_ru": "...",
+//   "avoid_ru": null,
+//   "near_synonyms": [],
+//   "forms": [],
+//   "examples": [
+//     { "en": "...", "ru": "...", "target": "..." }
+//   ]
+// }
+// `,
+
   });
 
   const text = response.output_text;
-  const parsed = JSON.parse(text);
+  let parsed;
+try {
+  parsed = JSON.parse(text);
+} catch (e) {
+  throw new Error("AI response is not valid JSON");
+}
 
-  if (
-    !parsed.translations?.length ||
-    !parsed.usage_en ||
-    !parsed.usage_ru ||
-    !parsed.examples?.length
-  ) {
-    throw new Error("Invalid AI response structure");
+
+ // translations обязательны
+if (!Array.isArray(parsed.translations) || parsed.translations.length < 1) {
+  throw new Error("Invalid AI response: translations missing");
+}
+if (
+  !parsed.translations.some(
+    (t) => t && t.primary === true && typeof t.ru === "string" && t.ru.trim()
+  )
+) {
+  throw new Error("Invalid AI response: one translation must be primary");
+}
+
+// usage_en/usage_ru обязательны
+if (!parsed.usage_en || !String(parsed.usage_en).trim()) {
+  throw new Error("Invalid AI response: usage_en missing");
+}
+if (!parsed.usage_ru || !String(parsed.usage_ru).trim()) {
+  throw new Error("Invalid AI response: usage_ru missing");
+}
+
+// examples обязательны + target обязателен
+if (!Array.isArray(parsed.examples) || parsed.examples.length < 3) {
+  throw new Error("Invalid AI response: examples missing");
+}
+
+for (const ex of parsed.examples) {
+  if (!ex?.en || !ex?.ru || !ex?.target) {
+    throw new Error("Invalid AI response: each example needs en/ru/target");
   }
+  if (!ex.en.includes(ex.target)) {
+    throw new Error("Invalid AI response: target must appear in en");
+  }
+
+  // требование "ровно один раз"
+  const count = ex.en.split(ex.target).length - 1;
+  if (count !== 1) {
+    throw new Error("Invalid AI response: target must appear exactly once");
+  }
+}
+
 
   return parsed;
 }
@@ -511,13 +626,21 @@ app.post("/ai/enrich-word", authMiddleware, async (req, res) => {
       { userId, wordId: oid },
       {
         $set: {
-          translations: aiData.translations || [],
-          usage_en: aiData.usage_en || "",
-          usage_ru: aiData.usage_ru || "",
-          examples: aiData.examples || [],
-          status: "ready",
-          error: null,
-        },
+  translations: aiData.translations || [],
+  usage_en: aiData.usage_en || "",
+  usage_ru: aiData.usage_ru || "",
+
+  examples: aiData.examples || [],
+
+  // ✅ новые поля сохраняем тоже
+  forms: Array.isArray(aiData.forms) ? aiData.forms : [],
+  avoid_ru: aiData.avoid_ru ?? null,
+  near_synonyms: Array.isArray(aiData.near_synonyms) ? aiData.near_synonyms : [],
+
+  status: "ready",
+  error: null,
+},
+
       },
       { new: true }
     );
