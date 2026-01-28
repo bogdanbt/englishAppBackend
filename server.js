@@ -240,147 +240,362 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-async function enrichWordWithOpenAI(word) {
-  const response = await openai.responses.create({
-    model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-    input: `
-You are helping a Russian-speaking learner master English vocabulary for real workplace usage (office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
-
-Return STRICT JSON only for the base word: "${word}"
-
-HARD REQUIREMENTS:
-1) translations: 1–3 Russian translations. One must be primary=true. Use label_en like "common" or "formal" (short).
-2) usage_en: 1 short sentence in simple English (B1) describing when to use it.
-3) usage_ru: Russian version of usage_en (1 short sentence).
-4) examples: Provide 3 short examples. Workplace tone, but not jargon-heavy.
-   Each example must include:
-   - en
-   - ru
-   - target: the exact word form used in the sentence (may differ from "${word}")
-   The target must appear exactly once in "en".
-
-OPTIONAL (only if truly helpful; otherwise use null or empty array):
-- avoid_ru: when NOT to use it / typical confusion.
-- near_synonyms: 0–2 similar words with short difference in Russian.
-- forms: only non-obvious forms that matter (e.g., go→went; deny→denies). Otherwise [].
-
-Style:
-- Prefer shorter sentences, but clarity beats shortness.
-- No markdown.
-- JSON only.
-
-JSON FORMAT:
-{
-  "word": "${word}",
-  "translations": [
-    { "ru": "...", "label_en": "common", "primary": true }
-  ],
-  "usage_en": "...",
-  "usage_ru": "...",
-  "examples": [
-    { "en": "...", "ru": "...", "target": "..." }
-  ],
-  "avoid_ru": null,
-  "near_synonyms": [],
-  "forms": []
-}
-`,
-
+// async function enrichWordWithOpenAI(word) {
+//   const response = await openai.responses.create({
+//     model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
 //     input: `
 // You are helping a Russian-speaking learner master English vocabulary for real workplace usage (office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
 
 // Return STRICT JSON only for the base word: "${word}"
 
 // HARD REQUIREMENTS:
-// - Provide 3 examples.
-// - Each example must include:
-//   - "en" short and natural
-//   - "ru" translation
-//   - "target": the exact word form used in the sentence (may differ from "${word}")
-//   - The target must appear exactly once in "en".
-// - Provide "usage_ru": when to use this word (1–2 short sentences in Russian).
+// 1) translations: 1–3 Russian translations. One must be primary=true. Use label_en like "common" or "formal" (short).
+// 2) usage_en: 1 short sentence in simple English (B1) describing when to use it.
+// 3) usage_ru: Russian version of usage_en (1 short sentence).
+// 4) examples: Provide 3 short examples. Workplace tone, but not jargon-heavy.
+//    Each example must include:
+//    - en
+//    - ru
+//    - target: the exact word form used in the sentence (may differ from "${word}")
+//    The target must appear exactly once in "en".
 
-// OPTIONAL (only if truly helpful, otherwise use null or empty array):
-// - "avoid_ru": when NOT to use it / typical wrong situation (only if a common confusion exists).
-// - "near_synonyms": 0–2 similar words with short difference in Russian (only if it prevents confusion).
-// - "forms": list ONLY non-obvious forms that matter for this word (e.g., irregular past like go→went; or denies vs deny; otherwise empty).
+// Always include these fields with strict types:
+// - avoid_ru: MUST be either null or a short Russian string (no empty string).
+// - near_synonyms: MUST be an array (0–2 items). Never null.
+// - forms: MUST be an array (0–5 items). Never null.
+
+// Fill rules:
+// - avoid_ru: use null unless there is a common real confusion.
+// - near_synonyms: include only if it prevents confusion; otherwise [].
+// - forms: include only non-obvious forms (irregular or tricky inflections); otherwise [].
+// - Important: Do NOT invent forms/synonyms. If unsure, return [] or null.
+
+// Output contract:
+// - The output must be a single JSON object (not an array).
+// - All keys from JSON FORMAT must be present (even if null or []).
+// - Do not include any extra keys.
+// - All string values must be non-empty after trimming (except avoid_ru can be null).
+
 
 // Style:
-// - Examples should sound like normal work conversation, but not jargon-heavy.
 // - Prefer shorter sentences, but clarity beats shortness.
 // - No markdown.
+// - JSON only.
 
 // JSON FORMAT:
 // {
 //   "word": "${word}",
+//   "translations": [
+//     { "ru": "...", "label_en": "common", "primary": true }
+//   ],
+//   "usage_en": "...",
 //   "usage_ru": "...",
-//   "avoid_ru": null,
-//   "near_synonyms": [],
-//   "forms": [],
 //   "examples": [
 //     { "en": "...", "ru": "...", "target": "..." }
-//   ]
+//   ],
+//   "avoid_ru": null,
+//   "near_synonyms": [],
+//   "forms": []
 // }
 // `,
 
-  });
+// //     input: `
+// // You are helping a Russian-speaking learner master English vocabulary for real workplace usage (office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
 
-  const text = response.output_text;
-  let parsed;
-try {
-  parsed = JSON.parse(text);
-} catch (e) {
-  throw new Error("AI response is not valid JSON");
-}
+// // Return STRICT JSON only for the base word: "${word}"
+
+// // HARD REQUIREMENTS:
+// // - Provide 3 examples.
+// // - Each example must include:
+// //   - "en" short and natural
+// //   - "ru" translation
+// //   - "target": the exact word form used in the sentence (may differ from "${word}")
+// //   - The target must appear exactly once in "en".
+// // - Provide "usage_ru": when to use this word (1–2 short sentences in Russian).
+
+// // OPTIONAL (only if truly helpful, otherwise use null or empty array):
+// // - "avoid_ru": when NOT to use it / typical wrong situation (only if a common confusion exists).
+// // - "near_synonyms": 0–2 similar words with short difference in Russian (only if it prevents confusion).
+// // - "forms": list ONLY non-obvious forms that matter for this word (e.g., irregular past like go→went; or denies vs deny; otherwise empty).
+
+// // Style:
+// // - Examples should sound like normal work conversation, but not jargon-heavy.
+// // - Prefer shorter sentences, but clarity beats shortness.
+// // - No markdown.
+
+// // JSON FORMAT:
+// // {
+// //   "word": "${word}",
+// //   "usage_ru": "...",
+// //   "avoid_ru": null,
+// //   "near_synonyms": [],
+// //   "forms": [],
+// //   "examples": [
+// //     { "en": "...", "ru": "...", "target": "..." }
+// //   ]
+// // }
+// // `,
+
+//   });
+
+//   const text = String(response.output_text || "").trim();
+
+//   console.log("=== AI RAW RESPONSE START ===");
+//   console.log(text);
+//   console.log("=== AI RAW RESPONSE END ===");
+
+//   // 1) убираем markdown code fences если модель вдруг их дала
+//   const jsonText = text.startsWith("```")
+//     ? text.replace(/```json|```/g, "").trim()
+//     : text;
+
+//   let parsed;
+//   try {
+//     parsed = JSON.parse(jsonText);
+//       // 2) AI не должен менять базовое слово
+//   if (
+//     !parsed?.word ||
+//     String(parsed.word).trim().toLowerCase() !== String(word).trim().toLowerCase()
+//   ) {
+//     throw new Error("Invalid AI response: word mismatch");
+//   }
+
+//   } catch (e) {
+//     throw new Error("AI response is not valid JSON (parse failed)");
+//   }
+
+//   // 3) нормализуем optional поля чтобы не падать на null/""/не тот тип
+//   parsed.avoid_ru =
+//     parsed.avoid_ru && String(parsed.avoid_ru).trim()
+//       ? String(parsed.avoid_ru).trim()
+//       : null;
+
+//   parsed.near_synonyms = Array.isArray(parsed.near_synonyms)
+//     ? parsed.near_synonyms
+//     : [];
+
+//   parsed.forms = Array.isArray(parsed.forms) ? parsed.forms : [];
+
+//   // нормализуем строки внутри
+//   parsed.usage_en = String(parsed.usage_en || "").trim();
+//   parsed.usage_ru = String(parsed.usage_ru || "").trim();
 
 
- // translations обязательны
-if (!Array.isArray(parsed.translations) || parsed.translations.length < 1) {
-  throw new Error("Invalid AI response: translations missing");
-}
-if (
-  !parsed.translations.some(
-    (t) => t && t.primary === true && typeof t.ru === "string" && t.ru.trim()
-  )
-) {
-  throw new Error("Invalid AI response: one translation must be primary");
-}
-
-// usage_en/usage_ru обязательны
-if (!parsed.usage_en || !String(parsed.usage_en).trim()) {
-  throw new Error("Invalid AI response: usage_en missing");
-}
-if (!parsed.usage_ru || !String(parsed.usage_ru).trim()) {
-  throw new Error("Invalid AI response: usage_ru missing");
-}
-
-// examples обязательны + target обязателен
-if (!Array.isArray(parsed.examples) || parsed.examples.length < 3) {
-  throw new Error("Invalid AI response: examples missing");
-}
-
-for (const ex of parsed.examples) {
-  if (!ex?.en || !ex?.ru || !ex?.target) {
-    throw new Error("Invalid AI response: each example needs en/ru/target");
-  }
-  if (!ex.en.includes(ex.target)) {
-    throw new Error("Invalid AI response: target must appear in en");
-  }
-
-  // требование "ровно один раз"
-  const count = ex.en.split(ex.target).length - 1;
-  if (count !== 1) {
-    throw new Error("Invalid AI response: target must appear exactly once");
-  }
-}
+//  // translations обязательны
+// if (!Array.isArray(parsed.translations) || parsed.translations.length < 1) {
+//   throw new Error("Invalid AI response: translations missing");
+// }
+// if (
+//   !parsed.translations.some(
+//     (t) =>
+//       t &&
+//       t.primary === true &&
+//       typeof t.ru === "string" &&
+//       t.ru.trim().length > 0 &&
+//       typeof t.label_en === "string" &&
+//       t.label_en.trim().length > 0
+//   )
+// ) {
+//   throw new Error("Invalid AI response: one translation must be primary (ru + label_en required)");
+// }
 
 
-  return parsed;
-}
+// // usage_en/usage_ru обязательны
+// if (!parsed.usage_en || !String(parsed.usage_en).trim()) {
+//   throw new Error("Invalid AI response: usage_en missing");
+// }
+// if (!parsed.usage_ru || !String(parsed.usage_ru).trim()) {
+//   throw new Error("Invalid AI response: usage_ru missing");
+// }
+
+// // examples обязательны + target обязателен
+// if (!Array.isArray(parsed.examples) || parsed.examples.length < 3) {
+//   throw new Error("Invalid AI response: examples missing");
+// }
+
+
+//   const norm = (s) =>
+//     String(s)
+//       .toLowerCase()
+//       .replace(/[“”]/g, '"')
+//       .replace(/[^a-z0-9' ]+/g, " ") // сносит пунктуацию
+//       .replace(/\s+/g, " ")
+//       .trim();
+
+//   const enTokens = norm(ex.en).split(" ");
+//   const targetToken = norm(ex.target);
+
+//   const count = enTokens.filter((t) => t === targetToken).length;
+
+//   if (count !== 1) {
+//     throw new Error(
+//       `Invalid AI response: target "${ex.target}" must appear exactly once in "${ex.en}"`
+//     );
+//   }
+
+
+
+//   return parsed;
+// }
 // конец хелпера аи 
 
 
 // ======= ГЕНЕРАЦИЯ ТОКЕНОВ =======
+async function enrichWordWithOpenAI(word) {
+  const response = await openai.responses.create({
+    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+
+    // ✅ НАСТОЯЩАЯ JSON-АРХИТЕКТУРА
+    text: {
+      format: {
+        type: "json_schema",
+        strict: true,
+        name: "word_enrichment",
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "word",
+            "translations",
+            "usage_en",
+            "usage_ru",
+            "examples",
+            "avoid_ru",
+            "near_synonyms",
+            "forms",
+          ],
+          properties: {
+            word: { type: "string" },
+
+            translations: {
+              type: "array",
+              minItems: 1,
+              maxItems: 3,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["ru", "label_en", "primary"],
+                properties: {
+                  ru: { type: "string" },
+                  label_en: { type: "string" },
+                  primary: { type: "boolean" },
+                },
+              },
+            },
+
+            usage_en: { type: "string" },
+            usage_ru: { type: "string" },
+
+            examples: {
+              type: "array",
+              minItems: 3,
+              maxItems: 3,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["en", "ru", "target"],
+                properties: {
+                  en: { type: "string" },
+                  ru: { type: "string" },
+                  target: { type: "string" },
+                },
+              },
+            },
+
+            avoid_ru: {
+              anyOf: [{ type: "string" }, { type: "null" }],
+            },
+
+            near_synonyms: {
+              type: "array",
+              maxItems: 2,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["word", "note_ru"],
+                properties: {
+                  word: { type: "string" },
+                  note_ru: { type: "string" },
+                },
+              },
+            },
+
+            forms: {
+              type: "array",
+              maxItems: 5,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["form", "note_ru"],
+                properties: {
+                  form: { type: "string" },
+                  note_ru: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+
+    // ⬇️ ПРОМПТ ПО СМЫСЛУ ТОТ ЖЕ, ЧТО У ТЕБЯ
+    input: `
+You are helping a Russian-speaking learner master English vocabulary for real workplace usage
+(office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
+
+Base word: "${word}"
+
+HARD REQUIREMENTS:
+1) translations: 1–3 Russian translations. One must be primary=true.
+2) usage_en: 1 short B1 sentence describing when to use the word.
+3) usage_ru: Russian version of usage_en.
+4) examples: Exactly 3 short workplace examples.
+   Each example must include:
+   - en
+   - ru
+   - target (exact form used in en, appears exactly once).
+
+Rules:
+- Always return all fields defined in the schema.
+- avoid_ru: null unless there is a real common confusion.
+- near_synonyms/forms: include only if truly necessary, otherwise [].
+- Do NOT invent information. If unsure, return null or [].
+- No markdown. JSON only.
+`,
+  });
+
+  // ✅ ГОТОВЫЙ ОБЪЕКТ, НЕ ТЕКСТ
+  const parsed = response.output_parsed;
+
+  // --- минимальная бизнес-валидация ---
+  if (parsed.word.toLowerCase() !== word.toLowerCase()) {
+    throw new Error("AI response word mismatch");
+  }
+
+  if (!parsed.translations.some((t) => t.primary === true)) {
+    throw new Error("Primary translation missing");
+  }
+
+  // проверка target (устойчивая)
+  const norm = (s) =>
+    String(s)
+      .toLowerCase()
+      .replace(/[^a-z0-9' ]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  for (const ex of parsed.examples) {
+    const tokens = norm(ex.en).split(" ");
+    const target = norm(ex.target);
+    if (tokens.filter((t) => t === target).length !== 1) {
+      throw new Error(`Target "${ex.target}" must appear exactly once`);
+    }
+  }
+
+  return parsed;
+}
+
+
 const generateAccessToken = (user) => {
   return jwt.sign(
     { userId: user.id, role: user.role }, // Используем `user.id`
@@ -658,7 +873,9 @@ app.post("/ai/enrich-word", authMiddleware, async (req, res) => {
       );
     } catch {}
 
-    return res.status(500).json({ error: "Server error" });
+return res.status(500).json({
+  error: err?.message || "Server error",
+});
   }
 });
 
