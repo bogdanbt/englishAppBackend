@@ -563,6 +563,8 @@ Rules:
 - No markdown. JSON only.
 `,
   });
+  console.log("AI output_parsed =", response?.output_parsed);
+
 
   // ✅ ГОТОВЫЙ ОБЪЕКТ, НЕ ТЕКСТ
   const parsed = response.output_parsed;
@@ -571,8 +573,6 @@ Rules:
   // if (parsed.word.toLowerCase() !== word.toLowerCase()) {
   //   throw new Error("AI response word mismatch");
   // }
-// word — это наш источник правды, AI может написать иначе (case, дефис, пробел)
-parsed.word = word;
 
   if (!parsed.translations.some((t) => t.primary === true)) {
     throw new Error("Primary translation missing");
@@ -770,6 +770,7 @@ app.get("/protected", authMiddleware, (req, res) => {
 // ===== AI WORD ENRICHMENT ENDPOINT =====
 
 app.get("/ai/enrich-word/:wordId", authMiddleware, async (req, res) => {
+  console.log("REQ /ai/enrich-word body =", req.body);
   try {
     const userId = req.user.userId;
     const { wordId } = req.params;
@@ -789,6 +790,8 @@ app.get("/ai/enrich-word/:wordId", authMiddleware, async (req, res) => {
   }
 });
 app.post("/ai/enrich-word", authMiddleware, async (req, res) => {
+  console.log("REQ /ai/enrich-word userId=", req.user?.userId, "body=", req.body);
+
   const userId = req.user.userId;
   const { wordId } = req.body || {};
 
@@ -836,6 +839,8 @@ app.post("/ai/enrich-word", authMiddleware, async (req, res) => {
     }
 
     // 4) мы владелец -> единственный платный вызов
+    console.log("CALL AI word=", wordDoc.word, "wordId=", wordId, "userId=", userId);
+
     const aiData = await enrichWordWithOpenAI(wordDoc.word);
 
     // 5) сохранить результат
