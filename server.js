@@ -568,9 +568,11 @@ Rules:
   const parsed = response.output_parsed;
 
   // --- минимальная бизнес-валидация ---
-  if (parsed.word.toLowerCase() !== word.toLowerCase()) {
-    throw new Error("AI response word mismatch");
-  }
+  // if (parsed.word.toLowerCase() !== word.toLowerCase()) {
+  //   throw new Error("AI response word mismatch");
+  // }
+// word — это наш источник правды, AI может написать иначе (case, дефис, пробел)
+parsed.word = word;
 
   if (!parsed.translations.some((t) => t.primary === true)) {
     throw new Error("Primary translation missing");
