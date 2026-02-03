@@ -397,11 +397,167 @@ const openai = new OpenAI({
 
 
 // ======= ГЕНЕРАЦИЯ ТОКЕНОВ =======
+// async function enrichWordWithOpenAI(word) {
+//   const response = await openai.responses.create({
+//     model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+
+//     // ✅ НАСТОЯЩАЯ JSON-АРХИТЕКТУРА
+//     text: {
+//       format: {
+//         type: "json_schema",
+//         strict: true,
+//         name: "word_enrichment",
+//         schema: {
+//           type: "object",
+//           additionalProperties: false,
+//           required: [
+//             "word",
+//             "translations",
+//             "usage_en",
+//             "usage_ru",
+//             "examples",
+//             "avoid_ru",
+//             "near_synonyms",
+//             "forms",
+//           ],
+//           properties: {
+//             word: { type: "string" },
+
+//             translations: {
+//               type: "array",
+//               minItems: 1,
+//               maxItems: 3,
+//               items: {
+//                 type: "object",
+//                 additionalProperties: false,
+//                 required: ["ru", "label_en", "primary"],
+//                 properties: {
+//                   ru: { type: "string" },
+//                   label_en: { type: "string" },
+//                   primary: { type: "boolean" },
+//                 },
+//               },
+//             },
+
+//             usage_en: { type: "string" },
+//             usage_ru: { type: "string" },
+
+//             examples: {
+//               type: "array",
+//               minItems: 3,
+//               maxItems: 3,
+//               items: {
+//                 type: "object",
+//                 additionalProperties: false,
+//                 required: ["en", "ru", "target"],
+//                 properties: {
+//                   en: { type: "string" },
+//                   ru: { type: "string" },
+//                   target: { type: "string" },
+//                 },
+//               },
+//             },
+
+//             avoid_ru: {
+//               anyOf: [{ type: "string" }, { type: "null" }],
+//             },
+
+//             near_synonyms: {
+//               type: "array",
+//               maxItems: 2,
+//               items: {
+//                 type: "object",
+//                 additionalProperties: false,
+//                 required: ["word", "note_ru"],
+//                 properties: {
+//                   word: { type: "string" },
+//                   note_ru: { type: "string" },
+//                 },
+//               },
+//             },
+
+//             forms: {
+//               type: "array",
+//               maxItems: 5,
+//               items: {
+//                 type: "object",
+//                 additionalProperties: false,
+//                 required: ["form", "note_ru"],
+//                 properties: {
+//                   form: { type: "string" },
+//                   note_ru: { type: "string" },
+//                 },
+//               },
+//             },
+//           },
+//         },
+//       },
+//     },
+
+//     // ⬇️ ПРОМПТ ПО СМЫСЛУ ТОТ ЖЕ, ЧТО У ТЕБЯ
+//     input: `
+// You are helping a Russian-speaking learner master English vocabulary for real workplace usage
+// (office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
+
+// Base word: "${word}"
+
+// HARD REQUIREMENTS:
+// 1) translations: 1–3 Russian translations. One must be primary=true.
+// 2) usage_en: 1 short B1 sentence describing when to use the word.
+// 3) usage_ru: Russian version of usage_en.
+// 4) examples: Exactly 3 short workplace examples.
+//    Each example must include:
+//    - en
+//    - ru
+//    - target (exact form used in en, appears exactly once).
+
+// Rules:
+// - Always return all fields defined in the schema.
+// - avoid_ru: null unless there is a real common confusion.
+// - near_synonyms/forms: include only if truly necessary, otherwise [].
+// - Do NOT invent information. If unsure, return null or [].
+// - No markdown. JSON only.
+// `,
+//   });
+//   console.log("AI output_parsed =", response?.output_parsed);
+
+
+//   // ✅ ГОТОВЫЙ ОБЪЕКТ, НЕ ТЕКСТ
+//   const parsed = response.output_parsed;
+
+//   // --- минимальная бизнес-валидация ---
+//   // if (parsed.word.toLowerCase() !== word.toLowerCase()) {
+//   //   throw new Error("AI response word mismatch");
+//   // }
+
+//   if (!parsed.translations.some((t) => t.primary === true)) {
+//     throw new Error("Primary translation missing");
+//   }
+
+//   // проверка target (устойчивая)
+//   const norm = (s) =>
+//     String(s)
+//       .toLowerCase()
+//       .replace(/[^a-z0-9' ]+/g, " ")
+//       .replace(/\s+/g, " ")
+//       .trim();
+
+//   for (const ex of parsed.examples) {
+//     const tokens = norm(ex.en).split(" ");
+//     const target = norm(ex.target);
+//     if (tokens.filter((t) => t === target).length !== 1) {
+//       throw new Error(`Target "${ex.target}" must appear exactly once`);
+//     }
+//   }
+
+//   return parsed;
+// }
+
 async function enrichWordWithOpenAI(word) {
   const response = await openai.responses.create({
     model: process.env.OPENAI_MODEL || "gpt-4o-mini",
 
-    // ✅ НАСТОЯЩАЯ JSON-АРХИТЕКТУРА
+    // structured output пытаемся включить, но НЕ полагаемся на output_parsed
     text: {
       format: {
         type: "json_schema",
@@ -422,7 +578,6 @@ async function enrichWordWithOpenAI(word) {
           ],
           properties: {
             word: { type: "string" },
-
             translations: {
               type: "array",
               minItems: 1,
@@ -438,10 +593,8 @@ async function enrichWordWithOpenAI(word) {
                 },
               },
             },
-
             usage_en: { type: "string" },
             usage_ru: { type: "string" },
-
             examples: {
               type: "array",
               minItems: 3,
@@ -457,11 +610,7 @@ async function enrichWordWithOpenAI(word) {
                 },
               },
             },
-
-            avoid_ru: {
-              anyOf: [{ type: "string" }, { type: "null" }],
-            },
-
+            avoid_ru: { anyOf: [{ type: "string" }, { type: "null" }] },
             near_synonyms: {
               type: "array",
               maxItems: 2,
@@ -475,7 +624,6 @@ async function enrichWordWithOpenAI(word) {
                 },
               },
             },
-
             forms: {
               type: "array",
               maxItems: 5,
@@ -494,7 +642,6 @@ async function enrichWordWithOpenAI(word) {
       },
     },
 
-    // ⬇️ ПРОМПТ ПО СМЫСЛУ ТОТ ЖЕ, ЧТО У ТЕБЯ
     input: `
 You are helping a Russian-speaking learner master English vocabulary for real workplace usage
 (office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
@@ -506,35 +653,50 @@ HARD REQUIREMENTS:
 2) usage_en: 1 short B1 sentence describing when to use the word.
 3) usage_ru: Russian version of usage_en.
 4) examples: Exactly 3 short workplace examples.
-   Each example must include:
-   - en
-   - ru
-   - target (exact form used in en, appears exactly once).
+   Each example must include: en, ru, target (exact form used in en, appears exactly once).
 
 Rules:
 - Always return all fields defined in the schema.
 - avoid_ru: null unless there is a real common confusion.
 - near_synonyms/forms: include only if truly necessary, otherwise [].
-- Do NOT invent information. If unsure, return null or [].
 - No markdown. JSON only.
 `,
   });
-  console.log("AI output_parsed =", response?.output_parsed);
 
+  const safeJsonParse = (t) => {
+    const raw = String(t || "").trim();
+    if (!raw) return null;
+    const cleaned = raw
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/```\s*$/i, "")
+      .trim();
+    try {
+      return JSON.parse(cleaned);
+    } catch {
+      return null;
+    }
+  };
 
-  // ✅ ГОТОВЫЙ ОБЪЕКТ, НЕ ТЕКСТ
-  const parsed = response.output_parsed;
+  const parsed = response?.output_parsed ?? safeJsonParse(response?.output_text);
 
-  // --- минимальная бизнес-валидация ---
-  // if (parsed.word.toLowerCase() !== word.toLowerCase()) {
-  //   throw new Error("AI response word mismatch");
-  // }
-
-  if (!parsed.translations.some((t) => t.primary === true)) {
-    throw new Error("Primary translation missing");
+  if (!parsed || typeof parsed !== "object") {
+    console.error("AI output_parsed =", response?.output_parsed);
+    console.error("AI output_text =", response?.output_text);
+    throw new Error("AI response is not valid JSON (no parsed output)");
   }
 
-  // проверка target (устойчивая)
+  // минимальная валидация, чтобы снова не словить "translations of undefined"
+  if (!Array.isArray(parsed.translations) || parsed.translations.length < 1) {
+    throw new Error("Invalid AI response: translations missing");
+  }
+  if (!parsed.translations.some((t) => t && t.primary === true)) {
+    throw new Error("Primary translation missing");
+  }
+  if (!Array.isArray(parsed.examples) || parsed.examples.length !== 3) {
+    throw new Error("Invalid AI response: examples missing");
+  }
+
+  // target должен встретиться ровно 1 раз
   const norm = (s) =>
     String(s)
       .toLowerCase()
