@@ -125,25 +125,10 @@ const Word = mongoose.model("Word", wordSchema);
 
 // ===== AI ENRICHMENT FOR VOCABULARY WORDS =====
 
-
-const WordAiEnrichmentSchema = new mongoose.Schema(
+// ===== GLOBAL AI ENRICHMENT CACHE (shared for all users) =====
+const GlobalWordEnrichmentSchema = new mongoose.Schema(
   {
-    userId: {
-      type: String,
-      required: true,
-      index: true,
-    },
-
-    wordId: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      index: true,
-    },
-
-    word: {
-      type: String,
-      required: true,
-    },
+    word: { type: String, required: true, unique: true, index: true },
 
     status: {
       type: String,
@@ -163,73 +148,44 @@ const WordAiEnrichmentSchema = new mongoose.Schema(
     usage_en: String,
     usage_ru: String,
 
-    // ✅ главное изменение: добавили target (форма слова как в примере)
     examples: [
       {
         en: String,
         ru: String,
-        target: String, // e.g. "denies", "denied", "went"
+        target: String,
       },
     ],
 
-    // ✅ опционально: только если AI реально дал полезные формы
-    // (для обычных слов может быть пусто)
     forms: [
       {
-        form: String,    // e.g. "went"
-        note_ru: String, // e.g. "прошедшая форма от go"
+        form: String,
+        note_ru: String,
       },
     ],
 
-    // ✅ опционально: только если есть типичная ошибка/неподходящий контекст
-    avoid_ru: {
-      type: String,
-      default: null,
-    },
+    avoid_ru: { type: String, default: null },
 
-    // ✅ опционально: 0–2 близких слова с коротким отличием
     near_synonyms: [
       {
-        word: String,    // e.g. "refuse"
-        note_ru: String, // e.g. "refuse — отказать; deny — отрицать факт"
+        word: String,
+        note_ru: String,
       },
     ],
 
-    model: {
-      type: String,
-      default: "gpt-4.1-mini",
-    },
-
-    promptVersion: {
-      type: String,
-      default: "v2", // ✅ обнови версию, чтобы отличать старые записи
-    },
-
-    constraints: {
-      example_level: {
-        type: String,
-        default: "B1",
-      },
-    },
+    model: { type: String, default: "gpt-4.1-mini" },
 
     openaiCalls: { type: Number, default: 0 },
     lastCallAt: { type: Date, default: null },
-
-    error: String,
+    error: { type: String, default: null },
   },
   { timestamps: true }
 );
 
-// ❗ защита от дублей
-WordAiEnrichmentSchema.index(
-  { userId: 1, wordId: 1 },
-  { unique: true }
+const GlobalWordEnrichment = mongoose.model(
+  "GlobalWordEnrichment",
+  GlobalWordEnrichmentSchema
 );
 
-const WordAiEnrichment = mongoose.model(
-  "WordAiEnrichment",
-  WordAiEnrichmentSchema
-);
 
 
 
@@ -769,123 +725,107 @@ app.get("/protected", authMiddleware, (req, res) => {
 
 // ===== AI WORD ENRICHMENT ENDPOINT =====
 
-app.get("/ai/enrich-word/:wordId", authMiddleware, async (req, res) => {
-  console.log("REQ /ai/enrich-word body =", req.body);
+// ===== GLOBAL AI WORD ENRICHMENT ENDPOINTS (shared cache) =====
+
+// GET: проверить кеш (готово/нет) по слову
+app.get("/ai/enrich-word", async (req, res) => {
   try {
-    const userId = req.user.userId;
-    const { wordId } = req.params;
+    const raw = (req.query.word || "").toString();
+    const word = raw.trim().toLowerCase();
 
-    if (!mongoose.Types.ObjectId.isValid(wordId)) {
-      return res.status(400).json({ error: "Invalid wordId" });
-    }
-    const oid = new mongoose.Types.ObjectId(wordId);
+    if (!word) return res.status(400).json({ error: "word query param required" });
+    if (word.length > 64) return res.status(400).json({ error: "word too long" });
 
-    const enrichment = await WordAiEnrichment.findOne({ userId, wordId: oid });
+    const enrichment = await GlobalWordEnrichment.findOne({ word }).lean();
     if (!enrichment) return res.status(404).json({ status: "missing" });
 
     return res.json(enrichment);
   } catch (err) {
-    console.error("AI enrich GET error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("GLOBAL AI enrich GET error:", err);
+    return res.status(500).json({ error: "Server error" });
   }
 });
-app.post("/ai/enrich-word", authMiddleware, async (req, res) => {
-  console.log("REQ /ai/enrich-word userId=", req.user?.userId, "body=", req.body);
 
-  const userId = req.user.userId;
-  const { wordId } = req.body || {};
-
-  // 0) валидация входа (чтобы не было CastError -> 500)
-  if (!wordId) return res.status(400).json({ error: "wordId required" });
-  if (!mongoose.Types.ObjectId.isValid(wordId)) {
-    return res.status(400).json({ error: "Invalid wordId" });
-  }
-  const oid = new mongoose.Types.ObjectId(wordId);
-
+// POST: если нет кеша — вызвать OpenAI, сохранить, вернуть
+app.post("/ai/enrich-word", async (req, res) => {
   try {
-    // 1) проверить, что слово вообще существует у этого пользователя
-    const wordDoc = await Word.findOne({ _id: oid, userId }).lean();
-    if (!wordDoc) return res.status(404).json({ error: "Word not found" });
+    const raw = (req.body?.word || "").toString();
+    const word = raw.trim().toLowerCase();
 
-    // 2) если уже готово — вернуть сразу (0 платных вызовов)
-    const existing = await WordAiEnrichment.findOne({ userId, wordId: oid });
+    if (!word) return res.status(400).json({ error: "word required" });
+    if (word.length > 64) return res.status(400).json({ error: "word too long" });
+
+    // 1) если уже готово — вернуть сразу
+    const existing = await GlobalWordEnrichment.findOne({ word });
     if (existing?.status === "ready") return res.json(existing);
 
-    // 3) атомарно "захватить" генерацию: только один запрос становится владельцем
-    //    - если уже processing -> этот запрос не владелец и вернёт 202
-    let claimed = null;
+    // 2) атомарно "захватить" генерацию (чтобы не было 10 параллельных OpenAI вызовов)
+    let claimed;
     try {
-      claimed = await WordAiEnrichment.findOneAndUpdate(
-        { userId, wordId: oid, status: { $ne: "processing" } },
+      claimed = await GlobalWordEnrichment.findOneAndUpdate(
+        { word, status: { $ne: "processing" } },
         {
-  $setOnInsert: { userId, wordId: oid, word: wordDoc.word },
-  $set: { status: "processing", error: null, lastCallAt: new Date() },
-  $inc: { openaiCalls: 1 },
-},
-
+          $setOnInsert: { word },
+          $set: { status: "processing", error: null, lastCallAt: new Date() },
+          $inc: { openaiCalls: 1 },
+        },
         { new: true, upsert: true }
       );
     } catch (e) {
-      // если гонка на upsert/unique index — не владелец
+      // гонка на unique word
       if (e?.code === 11000) {
         return res.status(202).json({ status: "processing" });
       }
       throw e;
     }
 
-    // если doc уже был processing — мы не владелец, просто скажем "processing"
     if (!claimed || claimed.status !== "processing") {
       return res.status(202).json({ status: "processing" });
     }
 
-    // 4) мы владелец -> единственный платный вызов
-    console.log("CALL AI word=", wordDoc.word, "wordId=", wordId, "userId=", userId);
+    // 3) единственный платный вызов
+    console.log("CALL AI (GLOBAL) word=", word);
+    const aiData = await enrichWordWithOpenAI(word);
 
-    const aiData = await enrichWordWithOpenAI(wordDoc.word);
-
-    // 5) сохранить результат
-    const updated = await WordAiEnrichment.findOneAndUpdate(
-      { userId, wordId: oid },
+    // 4) сохранить результат
+    const updated = await GlobalWordEnrichment.findOneAndUpdate(
+      { word },
       {
         $set: {
-  translations: aiData.translations || [],
-  usage_en: aiData.usage_en || "",
-  usage_ru: aiData.usage_ru || "",
-
-  examples: aiData.examples || [],
-
-  // ✅ новые поля сохраняем тоже
-  forms: Array.isArray(aiData.forms) ? aiData.forms : [],
-  avoid_ru: aiData.avoid_ru ?? null,
-  near_synonyms: Array.isArray(aiData.near_synonyms) ? aiData.near_synonyms : [],
-
-  status: "ready",
-  error: null,
-},
-
+          translations: aiData.translations || [],
+          usage_en: aiData.usage_en || "",
+          usage_ru: aiData.usage_ru || "",
+          examples: aiData.examples || [],
+          forms: Array.isArray(aiData.forms) ? aiData.forms : [],
+          avoid_ru: aiData.avoid_ru ?? null,
+          near_synonyms: Array.isArray(aiData.near_synonyms) ? aiData.near_synonyms : [],
+          status: "ready",
+          error: null,
+        },
       },
       { new: true }
     );
 
     return res.json(updated);
   } catch (err) {
-    console.error("AI enrich POST error:", err);
+    console.error("GLOBAL AI enrich POST error:", err);
 
-    // пометить failed (но аккуратно, без CastError)
+    // попытка пометить failed (не критично если тоже упадёт)
     try {
-      await WordAiEnrichment.findOneAndUpdate(
-        { userId, wordId: oid },
-        { $set: { status: "failed", error: err?.message || "Enrichment failed" } },
-        { new: true }
-      );
+      const raw = (req.body?.word || "").toString();
+      const word = raw.trim().toLowerCase();
+      if (word) {
+        await GlobalWordEnrichment.findOneAndUpdate(
+          { word },
+          { $set: { status: "failed", error: err?.message || "Enrichment failed" } },
+          { new: true }
+        );
+      }
     } catch {}
 
-return res.status(500).json({
-  error: err?.message || "Server error",
-});
+    return res.status(500).json({ error: err?.message || "Server error" });
   }
 });
-
 
 
 
