@@ -553,115 +553,122 @@ const openai = new OpenAI({
 //   return parsed;
 // }
 
-async function enrichWordWithOpenAI(word) {
-  const response = await openai.responses.create({
-    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+async function enrichWordWithOpenAI(word, reqId = "no-id") {
+  const DEBUG_AI = true;
+  const tag = `[${reqId}]`;
 
-    // structured output пытаемся включить, но НЕ полагаемся на output_parsed
-    text: {
-      format: {
-        type: "json_schema",
-        strict: true,
-        name: "word_enrichment",
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "word",
-            "translations",
-            "usage_en",
-            "usage_ru",
-            "examples",
-            "avoid_ru",
-            "near_synonyms",
-            "forms",
-          ],
-          properties: {
-            word: { type: "string" },
-            translations: {
-              type: "array",
-              minItems: 1,
-              maxItems: 3,
-              items: {
-                type: "object",
-                additionalProperties: false,
-                required: ["ru", "label_en", "primary"],
-                properties: {
-                  ru: { type: "string" },
-                  label_en: { type: "string" },
-                  primary: { type: "boolean" },
+  if (DEBUG_AI) {
+    console.log(`${tag} AI enrich start`, { word });
+  }
+
+  let response;
+  try {
+    response = await openai.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      text: {
+        format: {
+          type: "json_schema",
+          strict: true,
+          name: "word_enrichment",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "word",
+              "translations",
+              "usage_en",
+              "usage_ru",
+              "examples",
+              "avoid_ru",
+              "near_synonyms",
+              "forms",
+            ],
+            properties: {
+              word: { type: "string" },
+              translations: {
+                type: "array",
+                minItems: 1,
+                maxItems: 3,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["ru", "label_en", "primary"],
+                  properties: {
+                    ru: { type: "string" },
+                    label_en: { type: "string" },
+                    primary: { type: "boolean" },
+                  },
                 },
               },
-            },
-            usage_en: { type: "string" },
-            usage_ru: { type: "string" },
-            examples: {
-              type: "array",
-              minItems: 3,
-              maxItems: 3,
-              items: {
-                type: "object",
-                additionalProperties: false,
-                required: ["en", "ru", "target"],
-                properties: {
-                  en: { type: "string" },
-                  ru: { type: "string" },
-                  target: { type: "string" },
+              usage_en: { type: "string" },
+              usage_ru: { type: "string" },
+              examples: {
+                type: "array",
+                minItems: 3,
+                maxItems: 3,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["en", "ru", "target"],
+                  properties: {
+                    en: { type: "string" },
+                    ru: { type: "string" },
+                    target: { type: "string" },
+                  },
                 },
               },
-            },
-            avoid_ru: { anyOf: [{ type: "string" }, { type: "null" }] },
-            near_synonyms: {
-              type: "array",
-              maxItems: 2,
-              items: {
-                type: "object",
-                additionalProperties: false,
-                required: ["word", "note_ru"],
-                properties: {
-                  word: { type: "string" },
-                  note_ru: { type: "string" },
+              avoid_ru: { anyOf: [{ type: "string" }, { type: "null" }] },
+              near_synonyms: {
+                type: "array",
+                maxItems: 2,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["word", "note_ru"],
+                  properties: {
+                    word: { type: "string" },
+                    note_ru: { type: "string" },
+                  },
                 },
               },
-            },
-            forms: {
-              type: "array",
-              maxItems: 5,
-              items: {
-                type: "object",
-                additionalProperties: false,
-                required: ["form", "note_ru"],
-                properties: {
-                  form: { type: "string" },
-                  note_ru: { type: "string" },
+              forms: {
+                type: "array",
+                maxItems: 5,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["form", "note_ru"],
+                  properties: {
+                    form: { type: "string" },
+                    note_ru: { type: "string" },
+                  },
                 },
               },
             },
           },
         },
       },
-    },
 
-    input: `
-You are helping a Russian-speaking learner master English vocabulary for real workplace usage
-(office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
-
+      input: `
 Base word: "${word}"
-
-HARD REQUIREMENTS:
-1) translations: 1–3 Russian translations. One must be primary=true.
-2) usage_en: 1 short B1 sentence describing when to use the word.
-3) usage_ru: Russian version of usage_en.
-4) examples: Exactly 3 short workplace examples.
-   Each example must include: en, ru, target (exact form used in en, appears exactly once).
-
-Rules:
-- Always return all fields defined in the schema.
-- avoid_ru: null unless there is a real common confusion.
-- near_synonyms/forms: include only if truly necessary, otherwise [].
-- No markdown. JSON only.
+Return JSON only.
 `,
-  });
+    });
+  } catch (e) {
+    console.error(`${tag} OpenAI call failed`, { word, err: e?.message, stack: e?.stack });
+    throw e;
+  }
+
+  // Лог сырого ответа (ключевое, чтобы понять почему output_parsed = undefined)
+  if (DEBUG_AI) {
+    const text = String(response?.output_text || "");
+    console.log(`${tag} AI raw`, {
+      has_output_parsed: !!response?.output_parsed,
+      output_text_len: text.length,
+      output_text_head: text.slice(0, 1200), // не больше ~1200 символов
+      usage: response?.usage, // если есть
+    });
+  }
 
   const safeJsonParse = (t) => {
     const raw = String(t || "").trim();
@@ -680,12 +687,15 @@ Rules:
   const parsed = response?.output_parsed ?? safeJsonParse(response?.output_text);
 
   if (!parsed || typeof parsed !== "object") {
-    console.error("AI output_parsed =", response?.output_parsed);
-    console.error("AI output_text =", response?.output_text);
+    console.error(`${tag} AI parse failed`, {
+      word,
+      output_parsed: response?.output_parsed,
+      output_text_head: String(response?.output_text || "").slice(0, 1200),
+    });
     throw new Error("AI response is not valid JSON (no parsed output)");
   }
 
-  // минимальная валидация, чтобы снова не словить "translations of undefined"
+  // минимальная валидация
   if (!Array.isArray(parsed.translations) || parsed.translations.length < 1) {
     throw new Error("Invalid AI response: translations missing");
   }
@@ -694,6 +704,15 @@ Rules:
   }
   if (!Array.isArray(parsed.examples) || parsed.examples.length !== 3) {
     throw new Error("Invalid AI response: examples missing");
+  }
+
+  // Лог результата после парса
+  if (DEBUG_AI) {
+    console.log(`${tag} AI parsed ok`, {
+      word: parsed.word,
+      translationsCount: parsed.translations?.length,
+      examplesCount: parsed.examples?.length,
+    });
   }
 
   // target должен встретиться ровно 1 раз
