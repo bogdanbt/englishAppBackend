@@ -1,3 +1,103 @@
+// You are generating a vocabulary card for a Russian-speaking learner.
+// The learner wants to use the word in real life: at work, with friends, at brunch, in the street, and in the family.
+// Output MUST be ONLY a single JSON object. No markdown. No comments. No extra text.
+
+// BASE WORD (user input): "${word}"
+
+// CRITICAL OUTPUT RULES:
+// 1) Output must start with "{" and end with "}".
+// 2) Output must be valid JSON (double quotes for all keys/strings, no trailing commas).
+// 3) Do NOT include code fences like ```json.
+// 4) Do NOT include any keys other than the ones listed in the JSON SHAPE below.
+// 5) All strings must be non-empty after trimming (arrays may be empty).
+// 6) Use only standard ASCII quotes ".
+
+// JSON SHAPE (EXACT KEYS ONLY):
+// {
+//   "word": "${word}",
+//   "translations": [
+//     { "ru": "...", "primary": true },
+//     { "ru": "...", "primary": false }
+//   ],
+//   "usage_en": "...",
+//   "usage_ru": "...",
+//   "forms": [
+//     { "form": "...", "label_en": "...", "note_ru": "..." }
+//   ],
+//   "examples": [
+//     { "en": "...", "ru": "...", "target": "..." }
+//   ]
+// }
+
+// FIELD RULES:
+// A) word:
+// - Must equal exactly "${word}".
+
+// B) translations:
+// - Array with 1–3 items.
+// - Each item has exactly: { "ru": string, "primary": boolean }.
+// - Exactly ONE item must have "primary": true.
+// - "ru" must be Russian only (no English inside).
+
+// C) usage_en (IMPORTANT):
+// - 2 to 4 sentences in English.
+// - Explain meaning(s) and how to use it in everyday life + work.
+// - If the word_input can be used in TWO common ways (example: a past action vs a resulting state like "I destroyed..." vs "The room is destroyed"),
+//   you MUST explain BOTH uses clearly with simple patterns, e.g.:
+// - Explain 2–3 most common ways to use the word in real life. If the input form can mean both an action and a state/result, you MUST explain both.
+// - Keep it clear and practical, not academic.
+
+// D) usage_ru:
+// - Russian translation of usage_en
+
+// E) forms:
+// - If the word is used as a VERB form (including cases like "destroyed", "went"), provide EXACTLY 3 items:
+//   1) base form (label_en="base")
+//   2) past simple form (label_en="past")
+//   3) past participle form OR participle/adjective use (label_en="past_participle")
+// - NOTE: Sometimes past and past participle look the same (e.g., "destroyed"). In that case it is OK to repeat the same "form" text,
+//   but the note_ru must explain the difference (e.g., "прошедшее время" vs "причастие/состояние 'разрушенный'").
+// - If the word is NOT a verb or you are unsure, set "forms": [].
+// - Do NOT invent forms. Be conservative.
+
+// F) examples:
+// - Must be an array with EXACTLY 6 items.
+// - Examples must cover different real-life contexts (mix work + life), simple and natural:
+//   1) work message/status update
+//   2) meeting/discussion or teamwork
+//   3) family/home
+//   4) brunch/friends/social talk
+//   5) street/travel/daily life
+//   6) personal story/opinion about yourself
+// - Vocabulary restriction applies ONLY to examples:
+//   In "en" examples, besides the target itself, use only common words at B1 level or easier.
+//   Avoid idioms, slang, rare words, and complex phrasal verbs. Keep sentences short.
+
+// STRICT TARGET CONSTRAINTS (MANDATORY):
+// 1) "target" MUST be a single English token (one word only, no spaces).
+// 2) "target" MUST appear in "en" EXACTLY ONCE as a whole word (word boundary).
+// 3) Do NOT repeat the target in "en".
+// 4) NEVER set target to any JSON key name: word, translations, usage_en, usage_ru, forms, examples, en, ru, target.
+// 5) Prefer target to be exactly the word_input "${word}" when possible.
+
+// VALIDATION SAFETY REQUIREMENT (so parsing/validation is not painful):
+// - At least the FIRST 3 examples must be very simple and must use the word_input "${word}" as target.
+//   For these first 3 examples:
+//   - target MUST be exactly "${word}"
+//   - "${word}" must appear in "en" exactly once
+// - The last 3 examples may show other meanings/structures if relevant.
+
+// FINAL CHECKLIST (do silently):
+// - Valid JSON only, only allowed keys.
+// - translations length 1–3, exactly one primary=true.
+// - examples length = 6 with the required contexts.
+// - First 3 examples: target="${word}" and appears exactly once in en.
+// - Each example: target is one word and appears exactly once in en.
+
+// Return ONLY the JSON object.
+
+
+
 
 require("dotenv").config();
 const OpenAI = require("openai");
@@ -126,6 +226,7 @@ const Word = mongoose.model("Word", wordSchema);
 // ===== AI ENRICHMENT FOR VOCABULARY WORDS =====
 
 // ===== GLOBAL AI ENRICHMENT CACHE (shared for all users) =====
+
 const GlobalWordEnrichmentSchema = new mongoose.Schema(
   {
     word: { type: String, required: true, unique: true, index: true },
@@ -139,36 +240,29 @@ const GlobalWordEnrichmentSchema = new mongoose.Schema(
 
     translations: [
       {
-        ru: String,
-        label_en: String,
-        primary: Boolean,
+        ru: { type: String, required: true },
+        primary: { type: Boolean, required: true },
       },
     ],
 
-    usage_en: String,
-    usage_ru: String,
+    usage_en: { type: String, default: "" },
+    usage_ru: { type: String, default: "" },
 
+    // 6 examples
     examples: [
       {
-        en: String,
-        ru: String,
-        target: String,
+        en: { type: String, required: true },
+        ru: { type: String, required: true },
+        target: { type: String, required: true },
       },
     ],
 
+    // forms: [] или ровно 3 (base/past/past_participle)
     forms: [
       {
-        form: String,
-        note_ru: String,
-      },
-    ],
-
-    avoid_ru: { type: String, default: null },
-
-    near_synonyms: [
-      {
-        word: String,
-        note_ru: String,
+        form: { type: String, required: true },
+        label_en: { type: String, required: true }, // base|past|past_participle
+        note_ru: { type: String, required: true },
       },
     ],
 
@@ -180,6 +274,7 @@ const GlobalWordEnrichmentSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
 
 const GlobalWordEnrichment = mongoose.model(
   "GlobalWordEnrichment",
@@ -196,479 +291,109 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// async function enrichWordWithOpenAI(word) {
-//   const response = await openai.responses.create({
-//     model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-//     input: `
-// You are helping a Russian-speaking learner master English vocabulary for real workplace usage (office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
-
-// Return STRICT JSON only for the base word: "${word}"
-
-// HARD REQUIREMENTS:
-// 1) translations: 1–3 Russian translations. One must be primary=true. Use label_en like "common" or "formal" (short).
-// 2) usage_en: 1 short sentence in simple English (B1) describing when to use it.
-// 3) usage_ru: Russian version of usage_en (1 short sentence).
-// 4) examples: Provide 3 short examples. Workplace tone, but not jargon-heavy.
-//    Each example must include:
-//    - en
-//    - ru
-//    - target: the exact word form used in the sentence (may differ from "${word}")
-//    The target must appear exactly once in "en".
-
-// Always include these fields with strict types:
-// - avoid_ru: MUST be either null or a short Russian string (no empty string).
-// - near_synonyms: MUST be an array (0–2 items). Never null.
-// - forms: MUST be an array (0–5 items). Never null.
-
-// Fill rules:
-// - avoid_ru: use null unless there is a common real confusion.
-// - near_synonyms: include only if it prevents confusion; otherwise [].
-// - forms: include only non-obvious forms (irregular or tricky inflections); otherwise [].
-// - Important: Do NOT invent forms/synonyms. If unsure, return [] or null.
-
-// Output contract:
-// - The output must be a single JSON object (not an array).
-// - All keys from JSON FORMAT must be present (even if null or []).
-// - Do not include any extra keys.
-// - All string values must be non-empty after trimming (except avoid_ru can be null).
-
-
-// Style:
-// - Prefer shorter sentences, but clarity beats shortness.
-// - No markdown.
-// - JSON only.
-
-// JSON FORMAT:
-// {
-//   "word": "${word}",
-//   "translations": [
-//     { "ru": "...", "label_en": "common", "primary": true }
-//   ],
-//   "usage_en": "...",
-//   "usage_ru": "...",
-//   "examples": [
-//     { "en": "...", "ru": "...", "target": "..." }
-//   ],
-//   "avoid_ru": null,
-//   "near_synonyms": [],
-//   "forms": []
-// }
-// `,
-
-// //     input: `
-// // You are helping a Russian-speaking learner master English vocabulary for real workplace usage (office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
-
-// // Return STRICT JSON only for the base word: "${word}"
-
-// // HARD REQUIREMENTS:
-// // - Provide 3 examples.
-// // - Each example must include:
-// //   - "en" short and natural
-// //   - "ru" translation
-// //   - "target": the exact word form used in the sentence (may differ from "${word}")
-// //   - The target must appear exactly once in "en".
-// // - Provide "usage_ru": when to use this word (1–2 short sentences in Russian).
-
-// // OPTIONAL (only if truly helpful, otherwise use null or empty array):
-// // - "avoid_ru": when NOT to use it / typical wrong situation (only if a common confusion exists).
-// // - "near_synonyms": 0–2 similar words with short difference in Russian (only if it prevents confusion).
-// // - "forms": list ONLY non-obvious forms that matter for this word (e.g., irregular past like go→went; or denies vs deny; otherwise empty).
-
-// // Style:
-// // - Examples should sound like normal work conversation, but not jargon-heavy.
-// // - Prefer shorter sentences, but clarity beats shortness.
-// // - No markdown.
-
-// // JSON FORMAT:
-// // {
-// //   "word": "${word}",
-// //   "usage_ru": "...",
-// //   "avoid_ru": null,
-// //   "near_synonyms": [],
-// //   "forms": [],
-// //   "examples": [
-// //     { "en": "...", "ru": "...", "target": "..." }
-// //   ]
-// // }
-// // `,
-
-//   });
-
-//   const text = String(response.output_text || "").trim();
-
-//   console.log("=== AI RAW RESPONSE START ===");
-//   console.log(text);
-//   console.log("=== AI RAW RESPONSE END ===");
-
-//   // 1) убираем markdown code fences если модель вдруг их дала
-//   const jsonText = text.startsWith("```")
-//     ? text.replace(/```json|```/g, "").trim()
-//     : text;
-
-//   let parsed;
-//   try {
-//     parsed = JSON.parse(jsonText);
-//       // 2) AI не должен менять базовое слово
-//   if (
-//     !parsed?.word ||
-//     String(parsed.word).trim().toLowerCase() !== String(word).trim().toLowerCase()
-//   ) {
-//     throw new Error("Invalid AI response: word mismatch");
-//   }
-
-//   } catch (e) {
-//     throw new Error("AI response is not valid JSON (parse failed)");
-//   }
-
-//   // 3) нормализуем optional поля чтобы не падать на null/""/не тот тип
-//   parsed.avoid_ru =
-//     parsed.avoid_ru && String(parsed.avoid_ru).trim()
-//       ? String(parsed.avoid_ru).trim()
-//       : null;
-
-//   parsed.near_synonyms = Array.isArray(parsed.near_synonyms)
-//     ? parsed.near_synonyms
-//     : [];
-
-//   parsed.forms = Array.isArray(parsed.forms) ? parsed.forms : [];
-
-//   // нормализуем строки внутри
-//   parsed.usage_en = String(parsed.usage_en || "").trim();
-//   parsed.usage_ru = String(parsed.usage_ru || "").trim();
-
-
-//  // translations обязательны
-// if (!Array.isArray(parsed.translations) || parsed.translations.length < 1) {
-//   throw new Error("Invalid AI response: translations missing");
-// }
-// if (
-//   !parsed.translations.some(
-//     (t) =>
-//       t &&
-//       t.primary === true &&
-//       typeof t.ru === "string" &&
-//       t.ru.trim().length > 0 &&
-//       typeof t.label_en === "string" &&
-//       t.label_en.trim().length > 0
-//   )
-// ) {
-//   throw new Error("Invalid AI response: one translation must be primary (ru + label_en required)");
-// }
-
-
-// // usage_en/usage_ru обязательны
-// if (!parsed.usage_en || !String(parsed.usage_en).trim()) {
-//   throw new Error("Invalid AI response: usage_en missing");
-// }
-// if (!parsed.usage_ru || !String(parsed.usage_ru).trim()) {
-//   throw new Error("Invalid AI response: usage_ru missing");
-// }
-
-// // examples обязательны + target обязателен
-// if (!Array.isArray(parsed.examples) || parsed.examples.length < 3) {
-//   throw new Error("Invalid AI response: examples missing");
-// }
-
-
-//   const norm = (s) =>
-//     String(s)
-//       .toLowerCase()
-//       .replace(/[“”]/g, '"')
-//       .replace(/[^a-z0-9' ]+/g, " ") // сносит пунктуацию
-//       .replace(/\s+/g, " ")
-//       .trim();
-
-//   const enTokens = norm(ex.en).split(" ");
-//   const targetToken = norm(ex.target);
-
-//   const count = enTokens.filter((t) => t === targetToken).length;
-
-//   if (count !== 1) {
-//     throw new Error(
-//       `Invalid AI response: target "${ex.target}" must appear exactly once in "${ex.en}"`
-//     );
-//   }
-
-
-
-//   return parsed;
-// }
-// конец хелпера аи 
-
-
-// ======= ГЕНЕРАЦИЯ ТОКЕНОВ =======
-// async function enrichWordWithOpenAI(word) {
-//   const response = await openai.responses.create({
-//     model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-
-//     // ✅ НАСТОЯЩАЯ JSON-АРХИТЕКТУРА
-//     text: {
-//       format: {
-//         type: "json_schema",
-//         strict: true,
-//         name: "word_enrichment",
-//         schema: {
-//           type: "object",
-//           additionalProperties: false,
-//           required: [
-//             "word",
-//             "translations",
-//             "usage_en",
-//             "usage_ru",
-//             "examples",
-//             "avoid_ru",
-//             "near_synonyms",
-//             "forms",
-//           ],
-//           properties: {
-//             word: { type: "string" },
-
-//             translations: {
-//               type: "array",
-//               minItems: 1,
-//               maxItems: 3,
-//               items: {
-//                 type: "object",
-//                 additionalProperties: false,
-//                 required: ["ru", "label_en", "primary"],
-//                 properties: {
-//                   ru: { type: "string" },
-//                   label_en: { type: "string" },
-//                   primary: { type: "boolean" },
-//                 },
-//               },
-//             },
-
-//             usage_en: { type: "string" },
-//             usage_ru: { type: "string" },
-
-//             examples: {
-//               type: "array",
-//               minItems: 3,
-//               maxItems: 3,
-//               items: {
-//                 type: "object",
-//                 additionalProperties: false,
-//                 required: ["en", "ru", "target"],
-//                 properties: {
-//                   en: { type: "string" },
-//                   ru: { type: "string" },
-//                   target: { type: "string" },
-//                 },
-//               },
-//             },
-
-//             avoid_ru: {
-//               anyOf: [{ type: "string" }, { type: "null" }],
-//             },
-
-//             near_synonyms: {
-//               type: "array",
-//               maxItems: 2,
-//               items: {
-//                 type: "object",
-//                 additionalProperties: false,
-//                 required: ["word", "note_ru"],
-//                 properties: {
-//                   word: { type: "string" },
-//                   note_ru: { type: "string" },
-//                 },
-//               },
-//             },
-
-//             forms: {
-//               type: "array",
-//               maxItems: 5,
-//               items: {
-//                 type: "object",
-//                 additionalProperties: false,
-//                 required: ["form", "note_ru"],
-//                 properties: {
-//                   form: { type: "string" },
-//                   note_ru: { type: "string" },
-//                 },
-//               },
-//             },
-//           },
-//         },
-//       },
-//     },
-
-//     // ⬇️ ПРОМПТ ПО СМЫСЛУ ТОТ ЖЕ, ЧТО У ТЕБЯ
-//     input: `
-// You are helping a Russian-speaking learner master English vocabulary for real workplace usage
-// (office / meetings / delivery / stakeholders). Keep it simple (B1), practical, not slang.
-
-// Base word: "${word}"
-
-// HARD REQUIREMENTS:
-// 1) translations: 1–3 Russian translations. One must be primary=true.
-// 2) usage_en: 1 short B1 sentence describing when to use the word.
-// 3) usage_ru: Russian version of usage_en.
-// 4) examples: Exactly 3 short workplace examples.
-//    Each example must include:
-//    - en
-//    - ru
-//    - target (exact form used in en, appears exactly once).
-
-// Rules:
-// - Always return all fields defined in the schema.
-// - avoid_ru: null unless there is a real common confusion.
-// - near_synonyms/forms: include only if truly necessary, otherwise [].
-// - Do NOT invent information. If unsure, return null or [].
-// - No markdown. JSON only.
-// `,
-//   });
-//   console.log("AI output_parsed =", response?.output_parsed);
-
-
-//   // ✅ ГОТОВЫЙ ОБЪЕКТ, НЕ ТЕКСТ
-//   const parsed = response.output_parsed;
-
-//   // --- минимальная бизнес-валидация ---
-//   // if (parsed.word.toLowerCase() !== word.toLowerCase()) {
-//   //   throw new Error("AI response word mismatch");
-//   // }
-
-//   if (!parsed.translations.some((t) => t.primary === true)) {
-//     throw new Error("Primary translation missing");
-//   }
-
-//   // проверка target (устойчивая)
-//   const norm = (s) =>
-//     String(s)
-//       .toLowerCase()
-//       .replace(/[^a-z0-9' ]+/g, " ")
-//       .replace(/\s+/g, " ")
-//       .trim();
-
-//   for (const ex of parsed.examples) {
-//     const tokens = norm(ex.en).split(" ");
-//     const target = norm(ex.target);
-//     if (tokens.filter((t) => t === target).length !== 1) {
-//       throw new Error(`Target "${ex.target}" must appear exactly once`);
-//     }
-//   }
-
-//   return parsed;
-// }
-
 async function enrichWordWithOpenAI(word, reqId = "no-id") {
-  const DEBUG_AI = true;
+  const DEBUG_AI = process.env.DEBUG_AI === "1";
   const tag = `[${reqId}]`;
 
-  if (DEBUG_AI) {
-    console.log(`${tag} AI enrich start`, { word });
-  }
+  const prompt = `
+You are generating a vocabulary card for a Russian-speaking learner.
+The learner wants to use the word in real life: at work, with friends, at brunch, in the street, and in the family.
+Output MUST be ONLY a single JSON object. No markdown. No comments. No extra text.
 
-  let response;
-  try {
-    response = await openai.responses.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-      text: {
-        format: {
-          type: "json_schema",
-          strict: true,
-          name: "word_enrichment",
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            required: [
-              "word",
-              "translations",
-              "usage_en",
-              "usage_ru",
-              "examples",
-              "avoid_ru",
-              "near_synonyms",
-              "forms",
-            ],
-            properties: {
-              word: { type: "string" },
-              translations: {
-                type: "array",
-                minItems: 1,
-                maxItems: 3,
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["ru", "label_en", "primary"],
-                  properties: {
-                    ru: { type: "string" },
-                    label_en: { type: "string" },
-                    primary: { type: "boolean" },
-                  },
-                },
-              },
-              usage_en: { type: "string" },
-              usage_ru: { type: "string" },
-              examples: {
-                type: "array",
-                minItems: 3,
-                maxItems: 3,
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["en", "ru", "target"],
-                  properties: {
-                    en: { type: "string" },
-                    ru: { type: "string" },
-                    target: { type: "string" },
-                  },
-                },
-              },
-              avoid_ru: { anyOf: [{ type: "string" }, { type: "null" }] },
-              near_synonyms: {
-                type: "array",
-                maxItems: 2,
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["word", "note_ru"],
-                  properties: {
-                    word: { type: "string" },
-                    note_ru: { type: "string" },
-                  },
-                },
-              },
-              forms: {
-                type: "array",
-                maxItems: 5,
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["form", "note_ru"],
-                  properties: {
-                    form: { type: "string" },
-                    note_ru: { type: "string" },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
+BASE WORD (user input): "${word}"
 
-      input: `
-Base word: "${word}"
-Return JSON only.
-`,
-    });
-  } catch (e) {
-    console.error(`${tag} OpenAI call failed`, { word, err: e?.message, stack: e?.stack });
-    throw e;
-  }
+CRITICAL OUTPUT RULES:
+1) Output must start with "{" and end with "}".
+2) Output must be valid JSON (double quotes for all keys/strings, no trailing commas).
+3) Do NOT include code fences like \`\`\`json.
+4) Do NOT include any keys other than the ones listed in the JSON SHAPE below.
+5) All strings must be non-empty after trimming (arrays may be empty).
+6) Use only standard ASCII quotes ".
 
-  // Лог сырого ответа (ключевое, чтобы понять почему output_parsed = undefined)
-  if (DEBUG_AI) {
-    const text = String(response?.output_text || "");
-    console.log(`${tag} AI raw`, {
-      has_output_parsed: !!response?.output_parsed,
-      output_text_len: text.length,
-      output_text_head: text.slice(0, 1200), // не больше ~1200 символов
-      usage: response?.usage, // если есть
-    });
-  }
+JSON SHAPE (EXACT KEYS ONLY):
+{
+  "word": "${word}",
+  "translations": [
+    { "ru": "...", "primary": true },
+    { "ru": "...", "primary": false }
+  ],
+  "usage_en": "...",
+  "usage_ru": "...",
+  "forms": [
+    { "form": "...", "label_en": "...", "note_ru": "..." }
+  ],
+  "examples": [
+    { "en": "...", "ru": "...", "target": "..." }
+  ]
+}
+
+FIELD RULES:
+A) word:
+- Must equal exactly "${word}".
+
+B) translations:
+- Array with 1–3 items.
+- Each item has exactly: { "ru": string, "primary": boolean }.
+- Exactly ONE item must have "primary": true.
+- "ru" must be Russian only (no English inside).
+
+C) usage_en (IMPORTANT):
+- 2 to 4 sentences in English.
+- Explain meaning(s) and how to use it in everyday life + work.
+- If the word_input can be used in TWO common ways (example: a past action vs a resulting state like "I destroyed..." vs "The room is destroyed"),
+  you MUST explain BOTH uses clearly with simple patterns, e.g.:
+- Explain 2–3 most common ways to use the word in real life. If the input form can mean both an action and a state/result, you MUST explain both.
+- Keep it clear and practical, not academic.
+
+D) usage_ru:
+- Russian translation of usage_en
+
+E) forms:
+- If the word is used as a VERB form (including cases like "destroyed", "went"), provide EXACTLY 3 items:
+  1) base form (label_en="base")
+  2) past simple form (label_en="past")
+  3) past participle form OR participle/adjective use (label_en="past_participle")
+- NOTE: Sometimes past and past participle look the same (e.g., "destroyed"). In that case it is OK to repeat the same "form" text,
+  but the note_ru must explain the difference (e.g., "прошедшее время" vs "причастие/состояние 'разрушенный'").
+- If the word is NOT a verb or you are unsure, set "forms": [].
+- Do NOT invent forms. Be conservative.
+
+F) examples:
+- Must be an array with EXACTLY 6 items.
+- Examples must cover different real-life contexts (mix work + life), simple and natural:
+  1) work message/status update
+  2) meeting/discussion or teamwork
+  3) family/home
+  4) brunch/friends/social talk
+  5) street/travel/daily life
+  6) personal story/opinion about yourself
+- Vocabulary restriction applies ONLY to examples:
+  In "en" examples, besides the target itself, use only common words at B1 level or easier.
+  Avoid idioms, slang, rare words, and complex phrasal verbs. Keep sentences short.
+
+STRICT TARGET CONSTRAINTS (MANDATORY):
+1) "target" MUST be a single English token (one word only, no spaces).
+2) "target" MUST appear in "en" EXACTLY ONCE as a whole word (word boundary).
+3) Do NOT repeat the target in "en".
+4) NEVER set target to any JSON key name: word, translations, usage_en, usage_ru, forms, examples, en, ru, target.
+5) Prefer target to be exactly the word_input "${word}" when possible.
+
+VALIDATION SAFETY REQUIREMENT (so parsing/validation is not painful):
+- At least the FIRST 3 examples must be very simple and must use the word_input "${word}" as target.
+  For these first 3 examples:
+  - target MUST be exactly "${word}"
+  - "${word}" must appear in "en" exactly once
+- The last 3 examples may show other meanings/structures if relevant.
+
+FINAL CHECKLIST (do silently):
+- Valid JSON only, only allowed keys.
+- translations length 1–3, exactly one primary=true.
+- examples length = 6 with the required contexts.
+- First 3 examples: target="${word}" and appears exactly once in en.
+- Each example: target is one word and appears exactly once in en.
+
+Return ONLY the JSON object.
+`.trim();
 
   const safeJsonParse = (t) => {
     const raw = String(t || "").trim();
@@ -684,55 +409,82 @@ Return JSON only.
     }
   };
 
-  const parsed = response?.output_parsed ?? safeJsonParse(response?.output_text);
+  // --- общая валидация результата ---
+  const validate = (parsed) => {
+    if (!parsed || typeof parsed !== "object") throw new Error("AI response is not valid JSON");
 
-  if (!parsed || typeof parsed !== "object") {
-    console.error(`${tag} AI parse failed`, {
-      word,
-      output_parsed: response?.output_parsed,
-      output_text_head: String(response?.output_text || "").slice(0, 1200),
-    });
-    throw new Error("AI response is not valid JSON (no parsed output)");
-  }
+    if (String(parsed.word || "").trim().toLowerCase() !== word.toLowerCase()) {
+      throw new Error("AI response: word mismatch");
+    }
 
-  // минимальная валидация
-  if (!Array.isArray(parsed.translations) || parsed.translations.length < 1) {
-    throw new Error("Invalid AI response: translations missing");
-  }
-  if (!parsed.translations.some((t) => t && t.primary === true)) {
-    throw new Error("Primary translation missing");
-  }
-  if (!Array.isArray(parsed.examples) || parsed.examples.length !== 3) {
-    throw new Error("Invalid AI response: examples missing");
-  }
+    if (!Array.isArray(parsed.translations) || parsed.translations.length < 1 || parsed.translations.length > 3) {
+      throw new Error("AI response: translations invalid");
+    }
+    if (!parsed.translations.some((t) => t && t.primary === true && String(t.ru || "").trim())) {
+      throw new Error("AI response: primary translation missing");
+    }
 
-  // Лог результата после парса
-  if (DEBUG_AI) {
-    console.log(`${tag} AI parsed ok`, {
-      word: parsed.word,
-      translationsCount: parsed.translations?.length,
-      examplesCount: parsed.examples?.length,
-    });
-  }
+    if (!String(parsed.usage_en || "").trim()) throw new Error("AI response: usage_en missing");
+    if (!String(parsed.usage_ru || "").trim()) throw new Error("AI response: usage_ru missing");
 
-  // target должен встретиться ровно 1 раз
-  const norm = (s) =>
-    String(s)
-      .toLowerCase()
-      .replace(/[^a-z0-9' ]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    if (!Array.isArray(parsed.examples) || parsed.examples.length !== 6) {
+      throw new Error("AI response: examples must be exactly 6");
+    }
 
-  for (const ex of parsed.examples) {
-    const tokens = norm(ex.en).split(" ");
-    const target = norm(ex.target);
-    if (tokens.filter((t) => t === target).length !== 1) {
-      throw new Error(`Target "${ex.target}" must appear exactly once`);
+    const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const countOcc = (en, target) => {
+      const re = new RegExp(`\\b${escapeRegExp(target)}\\b`, "gi");
+      return (String(en).match(re) || []).length;
+    };
+    const forbiddenTargets = new Set(["word","translations","usage_en","usage_ru","forms","examples","en","ru","target"]);
+
+    for (const ex of parsed.examples) {
+      const target = String(ex.target || "").trim();
+      if (!target || target.includes(" ")) throw new Error(`AI response: invalid target "${target}"`);
+      if (forbiddenTargets.has(target)) throw new Error(`AI response: forbidden target "${target}"`);
+      if (countOcc(ex.en, target) !== 1) throw new Error(`AI response: target "${target}" not exactly once`);
+    }
+
+    if (!Array.isArray(parsed.forms)) parsed.forms = [];
+    if (!(parsed.forms.length === 0 || parsed.forms.length === 3)) {
+      throw new Error("AI response: forms must be [] or exactly 3 items");
+    }
+
+    return parsed;
+  };
+
+  const maxAttempts = 2;
+  let lastErr = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      if (DEBUG_AI) console.log(`${tag} AI attempt ${attempt} start`, { word });
+
+      const response = await openai.responses.create({
+        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+        input: prompt,
+      });
+
+      const text = String(response?.output_text || "");
+      if (DEBUG_AI) {
+        console.log(`${tag} AI attempt ${attempt} raw`, {
+          output_text_len: text.length,
+          output_text_head: text.slice(0, 1200),
+        });
+      }
+
+      const parsed = safeJsonParse(text);
+      return validate(parsed);
+    } catch (e) {
+      lastErr = e;
+      console.error(`${tag} AI attempt ${attempt} failed:`, e?.message || e);
+      // второй раз — последний, дальше не тратим деньги
     }
   }
 
-  return parsed;
+  throw lastErr || new Error("AI enrichment failed");
 }
+
 
 
 const generateAccessToken = (user) => {
@@ -750,6 +502,13 @@ const generateRefreshToken = (user) => {
     expiresIn: "14d",
   });
 };
+
+
+app.use((req, res, next) => {
+  req.reqId = req.headers["x-request-id"] || uuidv4();
+  res.setHeader("x-request-id", req.reqId);
+  next();
+});
 
 // ======= РЕГИСТРАЦИЯ =======
 app.post("/auth/register", async (req, res) => {
@@ -927,8 +686,11 @@ app.get("/ai/enrich-word", async (req, res) => {
   }
 });
 
+
 // POST: если нет кеша — вызвать OpenAI, сохранить, вернуть
 app.post("/ai/enrich-word", async (req, res) => {
+  const reqId = req.reqId || "no-id";
+
   try {
     const raw = (req.body?.word || "").toString();
     const word = raw.trim().toLowerCase();
@@ -940,14 +702,19 @@ app.post("/ai/enrich-word", async (req, res) => {
     const existing = await GlobalWordEnrichment.findOne({ word });
     if (existing?.status === "ready") return res.json(existing);
 
-    // 2) атомарно "захватить" генерацию (чтобы не было 10 параллельных OpenAI вызовов)
+    // 2) если кто-то уже генерит — не тратим деньги
+    if (existing?.status === "processing") {
+      return res.status(202).json({ status: "processing" });
+    }
+
+    // 3) атомарно захватить "processing"
     let claimed;
     try {
       claimed = await GlobalWordEnrichment.findOneAndUpdate(
         { word, status: { $ne: "processing" } },
         {
           $setOnInsert: { word },
-          $set: { status: "processing", error: null, lastCallAt: new Date() },
+          $set: { status: "processing", error: null, lastCallAt: new Date(), model: (process.env.OPENAI_MODEL || "gpt-4.1-mini") },
           $inc: { openaiCalls: 1 },
         },
         { new: true, upsert: true }
@@ -960,15 +727,17 @@ app.post("/ai/enrich-word", async (req, res) => {
       throw e;
     }
 
+    // если по какой-то причине не удалось “захватить”
     if (!claimed || claimed.status !== "processing") {
       return res.status(202).json({ status: "processing" });
     }
 
-    // 3) единственный платный вызов
-    console.log("CALL AI (GLOBAL) word=", word);
-    const aiData = await enrichWordWithOpenAI(word);
+    console.log(`[${reqId}] CALL AI (GLOBAL) word=${word}`);
 
-    // 4) сохранить результат
+    // 4) платный вызов (внутри retry максимум 2 попытки)
+    const aiData = await enrichWordWithOpenAI(word, reqId);
+
+    // 5) сохранить результат (ТОЛЬКО новый контракт)
     const updated = await GlobalWordEnrichment.findOneAndUpdate(
       { word },
       {
@@ -978,10 +747,10 @@ app.post("/ai/enrich-word", async (req, res) => {
           usage_ru: aiData.usage_ru || "",
           examples: aiData.examples || [],
           forms: Array.isArray(aiData.forms) ? aiData.forms : [],
-          avoid_ru: aiData.avoid_ru ?? null,
-          near_synonyms: Array.isArray(aiData.near_synonyms) ? aiData.near_synonyms : [],
           status: "ready",
           error: null,
+          lastCallAt: new Date(),
+          model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
         },
       },
       { new: true }
@@ -989,16 +758,16 @@ app.post("/ai/enrich-word", async (req, res) => {
 
     return res.json(updated);
   } catch (err) {
-    console.error("GLOBAL AI enrich POST error:", err);
+    console.error(`[${reqId}] GLOBAL AI enrich POST error:`, err);
 
-    // попытка пометить failed (не критично если тоже упадёт)
+    // пометить failed
     try {
       const raw = (req.body?.word || "").toString();
       const word = raw.trim().toLowerCase();
       if (word) {
         await GlobalWordEnrichment.findOneAndUpdate(
           { word },
-          { $set: { status: "failed", error: err?.message || "Enrichment failed" } },
+          { $set: { status: "failed", error: err?.message || "Enrichment failed", lastCallAt: new Date() } },
           { new: true }
         );
       }
