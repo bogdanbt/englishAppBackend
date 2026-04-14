@@ -281,6 +281,7 @@ function buildLearningItemSchema() {
   };
 }
 
+
 async function generateLearningDoc(parsedUnit) {
   const schema = buildLearningItemSchema();
 
@@ -289,44 +290,60 @@ You create English -> Russian study cards for a spaced repetition app.
 
 Return JSON only.
 
-Rules:
+Hard rules:
 1. item must stay EXACTLY as provided by the user.
 2. type must stay EXACTLY as provided by the user.
-3. practice must contain EXACTLY one cloze object.
-4. practice[0].type must be "cloze".
-5. practice[0].answer must EXACTLY match the supplied answer array.
-6. In practice[0].en, replace each answer token with "_____" and keep the original order.
-7. The number of blanks must match the number of answer tokens.
-8. For type="word", examples must contain EXACTLY 2 natural examples with Russian translations.
-9. For type="phrase", examples must be [].
-10. meaning is in English. meaningRu is in Russian.
-11. translate must be a natural Russian translation.
-12. No markdown. No commentary.
+3. If the user provided a hint in brackets, it is a HARD restriction, not a suggestion.
+4. practice.en must contain blanks "_____" only in place of the answer tokens.
+5. practice.ru must ALWAYS be a full Russian translation of the whole sentence, with NO blanks, NO underscores, NO omissions.
+6. answer must EXACTLY match the supplied answer array.
+7. No markdown. No explanations. JSON only.
+
+Rules for type="word":
+8. examples must contain EXACTLY 2 items.
+9. practice must contain EXACTLY 2 cloze items.
+10. The target meaning must follow the user hint exactly.
+
+Rules for type="phrase":
+11. examples must be [].
+12. practice must contain EXACTLY 1 cloze item.
+13. Blank ONLY the supplied answer tokens.
 `.trim();
 
   const userPrompt =
     parsedUnit.type === "word"
       ? `
-Input unit:
+Input:
 - item: "${parsedUnit.item}"
 - type: "word"
 - hint: "${parsedUnit.hint || ""}"
 - exact answer array: ${JSON.stringify(parsedUnit.answerParts)}
 
 Task:
-Create one learning document for this word/phrasal verb.
-Use the hint only to disambiguate meaning.
+Create one learning document for this word.
+
+Important:
+- If the user provided a hint in brackets, treat it as a strict semantic restriction.
+- Do not generate meanings, examples, or practice outside that restriction.
+- practice.ru must always be the full Russian translation without blanks.
+- Do not use any other meaning outside the hint.
+- examples = exactly 2
+- practice = exactly 2
 `.trim()
       : `
-Input unit:
+Input:
 - item: "${parsedUnit.item}"
 - type: "phrase"
 - exact answer array: ${JSON.stringify(parsedUnit.answerParts)}
 
 Task:
 Create one learning document for this phrase.
-Build the cloze so that ONLY the answer words are blanked out.
-examples must be [].
+
+Important:
+- examples must be []
+- practice must contain exactly 1 cloze item
+- Blank ONLY these answer tokens: ${JSON.stringify(parsedUnit.answerParts)}
+- practice.ru must be the full Russian translation of the whole sentence without blanks
 `.trim();
 
   const response = await openai.responses.create({
@@ -357,41 +374,70 @@ examples must be [].
     throw new Error("OpenAI returned invalid JSON");
   }
 
-  if (!doc?.practice?.[0]) {
-    throw new Error("OpenAI did not return practice block");
+  if (!doc?.practice?.length) {
+    throw new Error("OpenAI did not return practice");
   }
 
-  if (parsedUnit.type === "word" && (!Array.isArray(doc.examples) || doc.examples.length < 2)) {
-    throw new Error("OpenAI did not return 2 examples for word");
+  doc.item = parsedUnit.item;
+  doc.type = parsedUnit.type;
+  doc.translate = String(doc.translate || "").trim();
+  doc.meaning = String(doc.meaning || "").trim();
+  doc.meaningRu = String(doc.meaningRu || "").trim();
+
+  doc.examples = Array.isArray(doc.examples)
+    ? doc.examples.map((x) => ({
+        en: String(x.en || "").trim(),
+        ru: String(x.ru || "").trim(),
+      }))
+    : [];
+
+  doc.practice = Array.isArray(doc.practice)
+    ? doc.practice.map((p) => ({
+        type: "cloze",
+        en: String(p.en || "").trim(),
+        ru: String(p.ru || "").trim(),
+        answer: [...parsedUnit.answerParts],
+      }))
+    : [];
+
+  // минимальная защита от мусора
+  for (const p of doc.practice) {
+    if (!p.ru || p.ru.includes("_____")) {
+      throw new Error("practice.ru must be full Russian translation without blanks");
+    }
+  }
+
+  if (parsedUnit.type === "word") {
+    if (doc.examples.length !== 2) {
+      throw new Error("word must have exactly 2 examples");
+    }
+    if (doc.practice.length !== 2) {
+      throw new Error("word must have exactly 2 practice items");
+    }
+  }
+
+  if (parsedUnit.type === "phrase") {
+    if (doc.examples.length !== 0) {
+      throw new Error("phrase must not have examples");
+    }
+    if (doc.practice.length !== 1) {
+      throw new Error("phrase must have exactly 1 practice item");
+    }
   }
 
   return {
     rawInput: parsedUnit.rawInput,
     sourceHint: parsedUnit.hint || "",
     sourceAnswerMarker: parsedUnit.answerMarker || "",
-    item: parsedUnit.item,
-    translate: String(doc.translate || "").trim(),
-    type: parsedUnit.type,
-    meaning: String(doc.meaning || "").trim(),
-    meaningRu: String(doc.meaningRu || "").trim(),
-    examples:
-      parsedUnit.type === "word"
-        ? doc.examples.slice(0, 2).map((x) => ({
-            en: String(x.en || "").trim(),
-            ru: String(x.ru || "").trim(),
-          }))
-        : [],
-    practice: [
-      {
-        type: "cloze",
-        en: String(doc.practice[0].en || "").trim(),
-        ru: String(doc.practice[0].ru || "").trim(),
-        answer: parsedUnit.answerParts,
-      },
-    ],
+    item: doc.item,
+    translate: doc.translate,
+    type: doc.type,
+    meaning: doc.meaning,
+    meaningRu: doc.meaningRu,
+    examples: doc.examples,
+    practice: doc.practice,
   };
 }
-
 async function reviewAndReschedule(item, appRating, hintCount, isCorrect) {
   const now = new Date();
   const currentCard = hydrateFsrsCard(item.fsrsCard);
