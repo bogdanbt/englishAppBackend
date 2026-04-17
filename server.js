@@ -84,6 +84,20 @@ const lessonSessionSchema = new mongoose.Schema(
     endsAt: { type: Date, required: true },
     seenItemIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "LearningItem" }],
     isFinished: { type: Boolean, default: false },
+
+    currentItemId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "LearningItem",
+      default: null,
+    },
+    currentMode: {
+      type: String,
+      default: null, // "learn" | "practice"
+    },
+    currentPracticeIndex: {
+      type: Number,
+      default: null,
+    },
   },
   { timestamps: true }
 );
@@ -218,24 +232,87 @@ function extractResponseText(response) {
 
   return chunks.join("").trim();
 }
-
-function ensureLessonActive(lesson) {
+function ensureLessonExists(lesson) {
   if (!lesson) {
     const error = new Error("Lesson not found");
     error.status = 404;
     throw error;
   }
-
-  if (lesson.isFinished || new Date() > new Date(lesson.endsAt)) {
-    lesson.isFinished = true;
-    const error = new Error("Lesson is finished");
-    error.status = 400;
-    error.lessonFinished = true;
-    throw error;
-  }
 }
 
-function buildLearningItemSchema() {
+function isLessonExpired(lesson) {
+  return new Date() > new Date(lesson.endsAt);
+}
+
+function clearCurrentCard(lesson) {
+  lesson.currentItemId = null;
+  lesson.currentMode = null;
+  lesson.currentPracticeIndex = null;
+}
+
+function pickRandomPracticeIndex(item) {
+  if (!Array.isArray(item?.practice) || item.practice.length === 0) {
+    return 0;
+  }
+
+  return Math.floor(Math.random() * item.practice.length);
+}
+
+function buildLearnCardResponse(item) {
+  const previewPractice = item.practice?.[0] || null;
+
+  return {
+    status: "ok",
+    mode: "learn",
+    card: {
+      id: item._id,
+      item: item.item,
+      type: item.type,
+      translate: item.translate,
+      meaning: item.meaning,
+      meaningRu: item.meaningRu,
+      examples: item.examples,
+      practicePreview: previewPractice
+        ? {
+            answer: previewPractice.answer,
+            firstLetters: previewPractice.answer.map((part) => part[0] || ""),
+          }
+        : null,
+    },
+  };
+}
+
+function buildPracticeCardResponse(item, practiceIndex) {
+  const practice = item.practice?.[practiceIndex];
+
+  if (!practice) {
+    const error = new Error("Practice block missing");
+    error.status = 400;
+    throw error;
+  }
+
+  return {
+    status: "ok",
+    mode: "practice",
+    card: {
+      id: item._id,
+      item: item.item,
+      type: item.type,
+      translate: item.translate,
+      practiceIndex,
+      practice: {
+        type: practice.type,
+        en: practice.en,
+        ru: practice.ru,
+        answer: practice.answer,
+        firstLetters: practice.answer.map((part) => part[0] || ""),
+      },
+    },
+  };
+}
+function buildLearningItemSchema(itemType) {
+  const isWord = itemType === "word";
+
   return {
     type: "object",
     additionalProperties: false,
@@ -245,8 +322,11 @@ function buildLearningItemSchema() {
       type: { type: "string", enum: ["word", "phrase"] },
       meaning: { type: "string" },
       meaningRu: { type: "string" },
+
       examples: {
         type: "array",
+        minItems: isWord ? 2 : 0,
+        maxItems: isWord ? 2 : 0,
         items: {
           type: "object",
           additionalProperties: false,
@@ -257,10 +337,11 @@ function buildLearningItemSchema() {
           required: ["en", "ru"],
         },
       },
+
       practice: {
         type: "array",
-        minItems: 1,
-        maxItems: 1,
+        minItems: isWord ? 2 : 1,
+        maxItems: isWord ? 2 : 1,
         items: {
           type: "object",
           additionalProperties: false,
@@ -281,11 +362,12 @@ function buildLearningItemSchema() {
   };
 }
 
-
 async function generateLearningDoc(parsedUnit) {
-  const schema = buildLearningItemSchema();
+  const schema = buildLearningItemSchema(parsedUnit.type);
+  let rawText = "";
 
-  const systemPrompt = `
+  try {
+    const systemPrompt = `
 You create English -> Russian study cards for a spaced repetition app.
 
 Return JSON only.
@@ -310,9 +392,9 @@ Rules for type="phrase":
 13. Blank ONLY the supplied answer tokens.
 `.trim();
 
-  const userPrompt =
-    parsedUnit.type === "word"
-      ? `
+    const userPrompt =
+      parsedUnit.type === "word"
+        ? `
 Input:
 - item: "${parsedUnit.item}"
 - type: "word"
@@ -330,7 +412,7 @@ Important:
 - examples = exactly 2
 - practice = exactly 2
 `.trim()
-      : `
+        : `
 Input:
 - item: "${parsedUnit.item}"
 - type: "phrase"
@@ -346,97 +428,119 @@ Important:
 - practice.ru must be the full Russian translation of the whole sentence without blanks
 `.trim();
 
-  const response = await openai.responses.create({
-    model: OPENAI_MODEL,
-    input: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-    text: {
-      format: {
-        type: "json_schema",
-        name: "learning_item",
-        strict: true,
-        schema,
+    const response = await openai.responses.create({
+      model: OPENAI_MODEL,
+      input: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "learning_item",
+          strict: true,
+          schema,
+        },
       },
-    },
-  });
+    });
 
-  const rawText = extractResponseText(response);
-  if (!rawText) {
-    throw new Error("OpenAI returned empty response");
-  }
+    rawText = extractResponseText(response);
 
-  let doc;
-  try {
-    doc = JSON.parse(rawText);
-  } catch {
-    throw new Error("OpenAI returned invalid JSON");
-  }
-
-  if (!doc?.practice?.length) {
-    throw new Error("OpenAI did not return practice");
-  }
-
-  doc.item = parsedUnit.item;
-  doc.type = parsedUnit.type;
-  doc.translate = String(doc.translate || "").trim();
-  doc.meaning = String(doc.meaning || "").trim();
-  doc.meaningRu = String(doc.meaningRu || "").trim();
-
-  doc.examples = Array.isArray(doc.examples)
-    ? doc.examples.map((x) => ({
-        en: String(x.en || "").trim(),
-        ru: String(x.ru || "").trim(),
-      }))
-    : [];
-
-  doc.practice = Array.isArray(doc.practice)
-    ? doc.practice.map((p) => ({
-        type: "cloze",
-        en: String(p.en || "").trim(),
-        ru: String(p.ru || "").trim(),
-        answer: [...parsedUnit.answerParts],
-      }))
-    : [];
-
-  // минимальная защита от мусора
-  for (const p of doc.practice) {
-    if (!p.ru || p.ru.includes("_____")) {
-      throw new Error("practice.ru must be full Russian translation without blanks");
+    if (!rawText) {
+      const error = new Error("OpenAI returned empty response");
+      error.gptRaw = null;
+      throw error;
     }
-  }
 
-  if (parsedUnit.type === "word") {
-    if (doc.examples.length !== 2) {
-      throw new Error("word must have exactly 2 examples");
+    let doc;
+    try {
+      doc = JSON.parse(rawText);
+    } catch {
+      const error = new Error("OpenAI returned invalid JSON");
+      error.gptRaw = rawText;
+      throw error;
     }
-    if (doc.practice.length !== 2) {
-      throw new Error("word must have exactly 2 practice items");
-    }
-  }
 
-  if (parsedUnit.type === "phrase") {
-    if (doc.examples.length !== 0) {
-      throw new Error("phrase must not have examples");
+    if (!doc?.practice?.length) {
+      const error = new Error("OpenAI did not return practice");
+      error.gptRaw = rawText;
+      throw error;
     }
-    if (doc.practice.length !== 1) {
-      throw new Error("phrase must have exactly 1 practice item");
-    }
-  }
 
-  return {
-    rawInput: parsedUnit.rawInput,
-    sourceHint: parsedUnit.hint || "",
-    sourceAnswerMarker: parsedUnit.answerMarker || "",
-    item: doc.item,
-    translate: doc.translate,
-    type: doc.type,
-    meaning: doc.meaning,
-    meaningRu: doc.meaningRu,
-    examples: doc.examples,
-    practice: doc.practice,
-  };
+    doc.item = parsedUnit.item;
+    doc.type = parsedUnit.type;
+    doc.translate = String(doc.translate || "").trim();
+    doc.meaning = String(doc.meaning || "").trim();
+    doc.meaningRu = String(doc.meaningRu || "").trim();
+
+    doc.examples = Array.isArray(doc.examples)
+      ? doc.examples.map((x) => ({
+          en: String(x.en || "").trim(),
+          ru: String(x.ru || "").trim(),
+        }))
+      : [];
+
+    doc.practice = Array.isArray(doc.practice)
+      ? doc.practice.map((p) => ({
+          type: "cloze",
+          en: String(p.en || "").trim(),
+          ru: String(p.ru || "").trim(),
+          answer: [...parsedUnit.answerParts],
+        }))
+      : [];
+
+    for (const p of doc.practice) {
+      if (!p.ru || p.ru.includes("_____")) {
+        const error = new Error("practice.ru must be full Russian translation without blanks");
+        error.gptRaw = rawText;
+        throw error;
+      }
+    }
+
+    if (parsedUnit.type === "word") {
+      if (doc.examples.length !== 2) {
+        const error = new Error("word must have exactly 2 examples");
+        error.gptRaw = rawText;
+        throw error;
+      }
+      if (doc.practice.length !== 2) {
+        const error = new Error("word must have exactly 2 practice items");
+        error.gptRaw = rawText;
+        throw error;
+      }
+    }
+
+    if (parsedUnit.type === "phrase") {
+      if (doc.examples.length !== 0) {
+        const error = new Error("phrase must not have examples");
+        error.gptRaw = rawText;
+        throw error;
+      }
+      if (doc.practice.length !== 1) {
+        const error = new Error("phrase must have exactly 1 practice item");
+        error.gptRaw = rawText;
+        throw error;
+      }
+    }
+
+    return {
+      rawInput: parsedUnit.rawInput,
+      sourceHint: parsedUnit.hint || "",
+      sourceAnswerMarker: parsedUnit.answerMarker || "",
+      item: doc.item,
+      translate: doc.translate,
+      type: doc.type,
+      meaning: doc.meaning,
+      meaningRu: doc.meaningRu,
+      examples: doc.examples,
+      practice: doc.practice,
+    };
+  } catch (error) {
+    if (!error.gptRaw && rawText) {
+      error.gptRaw = rawText;
+    }
+    throw error;
+  }
 }
 async function reviewAndReschedule(item, appRating, hintCount, isCorrect) {
   const now = new Date();
@@ -521,11 +625,18 @@ app.post("/api/items/import", async (req, res) => {
           item: saved.item,
           type: saved.type,
         });
-      } catch (error) {
+             } catch (error) {
+        console.error("IMPORT_ITEM_FAILED", {
+          rawInput: rawUnit,
+          error: error.message,
+          gptRaw: error.gptRaw || null,
+        });
+
         results.push({
           rawInput: rawUnit,
           status: "error",
           error: error.message,
+          gptRaw: error.gptRaw || null,
         });
       }
     }
@@ -568,6 +679,9 @@ app.post("/api/lessons/start", async (_req, res) => {
       endsAt,
       seenItemIds: [],
       isFinished: false,
+      currentItemId: null,
+      currentMode: null,
+      currentPracticeIndex: null,
     });
 
     const dueCount = await LearningItem.countDocuments({
@@ -589,18 +703,47 @@ app.post("/api/lessons/start", async (_req, res) => {
 app.get("/api/lessons/:lessonId/next", async (req, res) => {
   try {
     const lesson = await LessonSession.findById(req.params.lessonId);
-    ensureLessonActive(lesson);
+    ensureLessonExists(lesson);
+
+    // Если карточка уже активна, возвращаем ее снова.
+    if (lesson.currentItemId) {
+      const currentItem = await LearningItem.findById(lesson.currentItemId);
+
+      if (!currentItem) {
+        clearCurrentCard(lesson);
+        await lesson.save();
+      } else if (lesson.currentMode === "learn") {
+        return res.json(buildLearnCardResponse(currentItem));
+      } else if (lesson.currentMode === "practice") {
+        return res.json(
+          buildPracticeCardResponse(currentItem, lesson.currentPracticeIndex ?? 0)
+        );
+      }
+    }
+
+    // Если время вышло и активной карточки уже нет, урок закончен.
+    if (lesson.isFinished || isLessonExpired(lesson)) {
+      lesson.isFinished = true;
+      clearCurrentCard(lesson);
+      await lesson.save();
+
+      return res.json({
+        status: "finished",
+        reason: "time_over",
+        message: "5 minutes are over. Good job. See you later.",
+      });
+    }
 
     const now = new Date();
 
     const item = await LearningItem.findOne({
       due: { $lte: now },
       _id: { $nin: lesson.seenItemIds },
-    })
-      .sort({ due: 1, createdAt: 1 });
+    }).sort({ due: 1, createdAt: 1 });
 
     if (!item) {
       lesson.isFinished = true;
+      clearCurrentCard(lesson);
       await lesson.save();
 
       return res.json({
@@ -610,58 +753,23 @@ app.get("/api/lessons/:lessonId/next", async (req, res) => {
     }
 
     lesson.seenItemIds.push(item._id);
-    await lesson.save();
-
-    const practice = item.practice?.[0];
+    lesson.currentItemId = item._id;
 
     if (!item.introSeen) {
-      return res.json({
-        status: "ok",
-        mode: "learn",
-        card: {
-          id: item._id,
-          item: item.item,
-          type: item.type,
-          translate: item.translate,
-          meaning: item.meaning,
-          meaningRu: item.meaningRu,
-          examples: item.examples,
-          // for simple MVP frontend hint logic
-          practicePreview: practice
-            ? {
-                answer: practice.answer,
-                firstLetters: practice.answer.map((part) => part[0] || ""),
-              }
-            : null,
-        },
-      });
+      lesson.currentMode = "learn";
+      lesson.currentPracticeIndex = null;
+      await lesson.save();
+
+      return res.json(buildLearnCardResponse(item));
     }
 
-    return res.json({
-      status: "ok",
-      mode: "practice",
-      card: {
-        id: item._id,
-        item: item.item,
-        type: item.type,
-        translate: item.translate,
-        practice: {
-          type: practice.type,
-          en: practice.en,
-          ru: practice.ru,
-          answer: practice.answer, // simple MVP: frontend can generate hints itself
-          firstLetters: practice.answer.map((part) => part[0] || ""),
-        },
-      },
-    });
+    const practiceIndex = pickRandomPracticeIndex(item);
+    lesson.currentMode = "practice";
+    lesson.currentPracticeIndex = practiceIndex;
+    await lesson.save();
+
+    return res.json(buildPracticeCardResponse(item, practiceIndex));
   } catch (error) {
-    if (error.lessonFinished) {
-      return res.status(400).json({
-        error: error.message,
-        lessonFinished: true,
-      });
-    }
-
     res.status(error.status || 500).json({
       error: error.message || "Failed to get next card",
     });
@@ -673,37 +781,58 @@ app.get("/api/lessons/:lessonId/next", async (req, res) => {
 app.post("/api/lessons/:lessonId/items/:itemId/complete-intro", async (req, res) => {
   try {
     const lesson = await LessonSession.findById(req.params.lessonId);
-    ensureLessonActive(lesson);
+    ensureLessonExists(lesson);
+
+    if (lesson.isFinished && !lesson.currentItemId) {
+      return res.status(400).json({
+        error: "Lesson is finished",
+        lessonFinished: true,
+      });
+    }
+
+    if (!lesson.currentItemId || String(lesson.currentItemId) !== req.params.itemId) {
+      return res.status(400).json({
+        error: "This item is not the current active card",
+      });
+    }
+
+    if (lesson.currentMode !== "learn") {
+      return res.status(400).json({
+        error: "Current card is not in learn mode",
+      });
+    }
 
     const item = await LearningItem.findById(req.params.itemId);
     if (!item) {
       return res.status(404).json({ error: "Item not found" });
     }
 
-    if (item.introSeen) {
-      return res.json({
-        ok: true,
-        alreadyCompleted: true,
-        nextDue: item.due,
-      });
+    let nextDue = item.due;
+
+    if (!item.introSeen) {
+      const result = await reviewAndReschedule(item, 3, 0, true);
+      nextDue = result.nextDue;
     }
 
-    const result = await reviewAndReschedule(item, 3, 0, true);
+    clearCurrentCard(lesson);
+
+    if (isLessonExpired(lesson)) {
+      lesson.isFinished = true;
+    }
+
+    await lesson.save();
 
     res.json({
       ok: true,
       introSeen: true,
       rating: 3,
-      nextDue: result.nextDue,
+      nextDue,
+      lessonFinished: lesson.isFinished,
+      message: lesson.isFinished
+        ? "5 minutes are over. Good job. See you later."
+        : null,
     });
   } catch (error) {
-    if (error.lessonFinished) {
-      return res.status(400).json({
-        error: error.message,
-        lessonFinished: true,
-      });
-    }
-
     res.status(error.status || 500).json({
       error: error.message || "Failed to complete intro",
     });
@@ -714,14 +843,35 @@ app.post("/api/lessons/:lessonId/items/:itemId/complete-intro", async (req, res)
 app.post("/api/lessons/:lessonId/items/:itemId/answer", async (req, res) => {
   try {
     const lesson = await LessonSession.findById(req.params.lessonId);
-    ensureLessonActive(lesson);
+    ensureLessonExists(lesson);
+
+    if (lesson.isFinished && !lesson.currentItemId) {
+      return res.status(400).json({
+        error: "Lesson is finished",
+        lessonFinished: true,
+      });
+    }
+
+    if (!lesson.currentItemId || String(lesson.currentItemId) !== req.params.itemId) {
+      return res.status(400).json({
+        error: "This item is not the current active card",
+      });
+    }
+
+    if (lesson.currentMode !== "practice") {
+      return res.status(400).json({
+        error: "Current card is not in practice mode",
+      });
+    }
 
     const item = await LearningItem.findById(req.params.itemId);
     if (!item) {
       return res.status(404).json({ error: "Item not found" });
     }
 
-    const practice = item.practice?.[0];
+    const practiceIndex = lesson.currentPracticeIndex ?? 0;
+    const practice = item.practice?.[practiceIndex];
+
     if (!practice) {
       return res.status(400).json({ error: "Practice block missing" });
     }
@@ -736,26 +886,39 @@ app.post("/api/lessons/:lessonId/items/:itemId/answer", async (req, res) => {
     const hintCount = Math.max(0, Number(req.body?.hintCount || 0));
 
     const isCorrect = answersMatch(practice.answer, answers);
-    const appRating = calculateAppRating(isCorrect, hintCount);
 
-    const result = await reviewAndReschedule(item, appRating, hintCount, isCorrect);
-
-    res.json({
-      ok: true,
-      correct: isCorrect,
-      rating: appRating,
-      hintCount,
-      nextDue: result.nextDue,
-      expectedAnswer: isCorrect ? null : practice.answer,
-    });
-  } catch (error) {
-    if (error.lessonFinished) {
-      return res.status(400).json({
-        error: error.message,
-        lessonFinished: true,
+    if (!isCorrect) {
+      return res.json({
+        ok: true,
+        correct: false,
+        locked: true,
+        message: "Keep trying",
       });
     }
 
+    const appRating = calculateAppRating(true, hintCount);
+    const result = await reviewAndReschedule(item, appRating, hintCount, true);
+
+    clearCurrentCard(lesson);
+
+    if (isLessonExpired(lesson)) {
+      lesson.isFinished = true;
+    }
+
+    await lesson.save();
+
+    res.json({
+      ok: true,
+      correct: true,
+      rating: appRating,
+      hintCount,
+      nextDue: result.nextDue,
+      lessonFinished: lesson.isFinished,
+      message: lesson.isFinished
+        ? "5 minutes are over. Good job. See you later."
+        : null,
+    });
+  } catch (error) {
     res.status(error.status || 500).json({
       error: error.message || "Failed to submit answer",
     });
