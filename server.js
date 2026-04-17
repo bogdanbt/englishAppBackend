@@ -361,10 +361,57 @@ function buildLearningItemSchema(itemType) {
     required: ["item", "translate", "type", "meaning", "meaningRu", "examples", "practice"],
   };
 }
+async function resolveHint(item, hint) {
+  if (!hint) return null;
+
+  const response = await openai.responses.create({
+    model: OPENAI_MODEL,
+    input: [
+      {
+        role: "user",
+        content: `The user wants to learn the English word or phrase "${item}" with this hint: "${hint}"
+The hint describes which specific meaning or usage they want. It can be anything: an abbreviation, a Russian word, a grammatical note, or free text.
+
+Return ONLY a JSON object, no markdown:
+{
+  "translate": "<Russian translation matching this exact meaning>",
+  "meaning": "<English definition matching this exact meaning, 5-10 words>",
+  "meaningRu": "<same definition in Russian>",
+  "constraint": "<one sentence in English: what this word must mean in the generated card>"
+}`,
+      },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "hint_resolution",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            translate: { type: "string" },
+            meaning: { type: "string" },
+            meaningRu: { type: "string" },
+            constraint: { type: "string" },
+          },
+          required: ["translate", "meaning", "meaningRu", "constraint"],
+        },
+      },
+    },
+  });
+
+  const raw = extractResponseText(response);
+  return JSON.parse(raw);
+}
+
 
 async function generateLearningDoc(parsedUnit) {
   const schema = buildLearningItemSchema(parsedUnit.type);
   let rawText = "";
+
+  // Resolve hint into concrete semantic constraint before main generation
+  const resolved = parsedUnit.hint ? await resolveHint(parsedUnit.item, parsedUnit.hint) : null;
 
   try {
     const systemPrompt = `
@@ -392,23 +439,26 @@ Rules for type="phrase":
 13. Blank ONLY the supplied answer tokens.
 `.trim();
 
-    const userPrompt =
+   const userPrompt =
       parsedUnit.type === "word"
         ? `
+${resolved ? `SEMANTIC LOCK — every field must strictly follow this resolved meaning:
+- translate (use exactly this value): "${resolved.translate}"
+- meaning (use exactly this value): "${resolved.meaning}"
+- meaningRu (use exactly this value): "${resolved.meaningRu}"
+- constraint: ${resolved.constraint}
+Do NOT use any other meaning of "${parsedUnit.item}". The fields translate/meaning/meaningRu are already resolved — copy them exactly.
+` : ""}
 Input:
 - item: "${parsedUnit.item}"
 - type: "word"
-- hint: "${parsedUnit.hint || ""}"
 - exact answer array: ${JSON.stringify(parsedUnit.answerParts)}
 
 Task:
 Create one learning document for this word.
 
 Important:
-- If the user provided a hint in brackets, treat it as a strict semantic restriction.
-- Do not generate meanings, examples, or practice outside that restriction.
 - practice.ru must always be the full Russian translation without blanks.
-- Do not use any other meaning outside the hint.
 - examples = exactly 2
 - practice = exactly 2
 `.trim()
@@ -469,9 +519,10 @@ Important:
 
     doc.item = parsedUnit.item;
     doc.type = parsedUnit.type;
-    doc.translate = String(doc.translate || "").trim();
-    doc.meaning = String(doc.meaning || "").trim();
-    doc.meaningRu = String(doc.meaningRu || "").trim();
+    // If hint was resolved, lock these fields to the resolved values
+    doc.translate = resolved ? resolved.translate : String(doc.translate || "").trim();
+    doc.meaning = resolved ? resolved.meaning : String(doc.meaning || "").trim();
+    doc.meaningRu = resolved ? resolved.meaningRu : String(doc.meaningRu || "").trim();
 
     doc.examples = Array.isArray(doc.examples)
       ? doc.examples.map((x) => ({
