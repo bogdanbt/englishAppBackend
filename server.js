@@ -240,6 +240,35 @@ function ensureLessonExists(lesson) {
   }
 }
 
+function addDays(date, days) {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+async function markAlreadyKnown(item) {
+  const now = new Date();
+  const targetDue = addDays(now, 7);
+
+  // Сохраняем FSRS-логику (как "Easy"), но насильно ставим due = +7 дней (KISS и соответствует требованию)
+  const currentCard = hydrateFsrsCard(item.fsrsCard);
+  const result = scheduler.next(currentCard, now, Rating.Easy);
+
+  result.card.due = targetDue;
+
+  item.fsrsCard = result.card;
+  item.due = targetDue;
+
+  item.introSeen = true;
+
+  item.totalReviews += 1;
+  item.lastReviewedAt = now;
+  item.lastRating = 4;
+  item.lastHintCount = 0;
+  item.lastResult = "correct";
+
+  await item.save();
+
+  return { nextDue: item.due };
+}
 function isLessonExpired(lesson) {
   return new Date() > new Date(lesson.endsAt);
 }
@@ -370,11 +399,13 @@ async function resolveHint(item, hint) {
       {
         role: "user",
         content: `The user wants to learn the English word or phrase "${item}" with this hint: "${hint}"
-The hint describes which specific meaning or usage they want. It can be anything: an abbreviation, a Russian word, a grammatical note, or free text.
-
+The hint describes which specific meaning or usage they want. It can be anything: an abbreviation, a Russian word, a grammatical note, or free text. The hint may be approximate or misspelled — interpret what the user most likely intended.
 Return ONLY a JSON object, no markdown:
 {
-  "translate": "<Russian translation matching this exact meaning>",
+  "translate": "<the most natural, colloquial Russian equivalent — 
+  the word a native Russian speaker would actually use. 
+  One or two words maximum. NOT a literal translation, 
+  but the closest natural word.>",
   "meaning": "<English definition matching this exact meaning, 5-10 words>",
   "meaningRu": "<same definition in Russian>",
   "constraint": "<one sentence in English: what this word must mean in the generated card>"
@@ -829,6 +860,8 @@ app.get("/api/lessons/:lessonId/next", async (req, res) => {
 
 // Mark first intro screen as completed
 // MVP choice: this counts as a "Good" first exposure in FSRS
+// Mark first intro screen as completed
+// Supports "alreadyKnown": push due at least +7 days
 app.post("/api/lessons/:lessonId/items/:itemId/complete-intro", async (req, res) => {
   try {
     const lesson = await LessonSession.findById(req.params.lessonId);
@@ -858,11 +891,42 @@ app.post("/api/lessons/:lessonId/items/:itemId/complete-intro", async (req, res)
       return res.status(404).json({ error: "Item not found" });
     }
 
-    let nextDue = item.due;
+    const alreadyKnown = Boolean(req.body?.alreadyKnown);
 
-    if (!item.introSeen) {
-      const result = await reviewAndReschedule(item, 3, 0, true);
-      nextDue = result.nextDue;
+    let nextDue = item.due;
+    let rating = 3;
+
+    if (alreadyKnown) {
+      // KISS: “я уже знаю” => гарантированно показать не раньше чем через 7 дней
+      const now = new Date();
+      const minDue = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+      // Обновим FSRS как Easy, но due принудительно минимум +7 дней
+      const currentCard = hydrateFsrsCard(item.fsrsCard);
+      const result = scheduler.next(currentCard, now, Rating.Easy);
+
+      result.card.due = minDue;
+
+      item.fsrsCard = result.card;
+      item.due = minDue;
+
+      item.introSeen = true;
+      item.totalReviews += 1;
+      item.lastReviewedAt = now;
+      item.lastRating = 4;
+      item.lastHintCount = 0;
+      item.lastResult = "correct";
+
+      await item.save();
+
+      nextDue = item.due;
+      rating = 4;
+    } else {
+      // Обычный сценарий: первое знакомство засчитываем как "Good"
+      if (!item.introSeen) {
+        const result = await reviewAndReschedule(item, 3, 0, true);
+        nextDue = result.nextDue;
+      }
     }
 
     clearCurrentCard(lesson);
@@ -876,12 +940,11 @@ app.post("/api/lessons/:lessonId/items/:itemId/complete-intro", async (req, res)
     res.json({
       ok: true,
       introSeen: true,
-      rating: 3,
+      alreadyKnown,
+      rating,
       nextDue,
       lessonFinished: lesson.isFinished,
-      message: lesson.isFinished
-        ? "5 minutes are over. Good job. See you later."
-        : null,
+      message: lesson.isFinished ? "5 minutes are over. Good job. See you later." : null,
     });
   } catch (error) {
     res.status(error.status || 500).json({
@@ -889,7 +952,16 @@ app.post("/api/lessons/:lessonId/items/:itemId/complete-intro", async (req, res)
     });
   }
 });
+app.delete("/api/items/:itemId", async (req, res) => {
+  try {
+    const deleted = await LearningItem.findByIdAndDelete(req.params.itemId);
+    if (!deleted) return res.status(404).json({ error: "Item not found" });
 
+    res.json({ ok: true, deletedId: req.params.itemId });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Failed to delete item" });
+  }
+});
 // Submit user answer for cloze card
 app.post("/api/lessons/:lessonId/items/:itemId/answer", async (req, res) => {
   try {
