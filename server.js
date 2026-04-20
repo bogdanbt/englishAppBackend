@@ -56,6 +56,9 @@ const learningItemSchema = new mongoose.Schema(
     item: { type: String, required: true },
     translate: { type: String, required: true },
     type: { type: String, enum: ["word", "phrase"], required: true },
+    // phrase notes (optional)
+    sourceNote: { type: String, default: "" }, // what user typed after note:
+    note: { type: String, default: "" },       // final note shown in app
     meaning: { type: String, required: true },
     meaningRu: { type: String, required: true },
     examples: { type: [exampleSchema], default: [] },
@@ -124,6 +127,49 @@ function splitAnswerToArray(text) {
     .filter(Boolean);
 }
 
+// function parseRawUnit(rawUnit) {
+//   const rawInput = String(rawUnit).trim();
+
+//   // captures "text(marker)" where marker is the LAST (...) block
+//   const match = rawInput.match(/^(.*?)\s*\(([^()]*)\)\s*$/);
+
+//   if (!match) {
+//     return {
+//       rawInput,
+//       item: rawInput,
+//       type: "word",
+//       hint: "",
+//       answerMarker: "",
+//       answerParts: splitAnswerToArray(rawInput),
+//     };
+//   }
+
+//   const item = match[1].trim();
+//   const marker = match[2].trim();
+
+//   if (marker.toLowerCase().startsWith("answer:")) {
+//     const answerMarker = marker.slice(marker.indexOf(":") + 1).trim();
+
+//     return {
+//       rawInput,
+//       item,
+//       type: "phrase",
+//       hint: "",
+//       answerMarker,
+//       answerParts: splitAnswerToArray(answerMarker),
+//     };
+//   }
+
+//   return {
+//     rawInput,
+//     item,
+//     type: "word",
+//     hint: marker,
+//     answerMarker: "",
+//     answerParts: splitAnswerToArray(item),
+//   };
+// }
+
 function parseRawUnit(rawUnit) {
   const rawInput = String(rawUnit).trim();
 
@@ -138,14 +184,32 @@ function parseRawUnit(rawUnit) {
       hint: "",
       answerMarker: "",
       answerParts: splitAnswerToArray(rawInput),
+      note: "",
     };
   }
 
   const item = match[1].trim();
-  const marker = match[2].trim();
+  const markerRaw = match[2].trim();
+  const markerLower = markerRaw.toLowerCase();
 
-  if (marker.toLowerCase().startsWith("answer:")) {
-    const answerMarker = marker.slice(marker.indexOf(":") + 1).trim();
+  // If marker contains answer:, treat as phrase (and allow note:)
+  if (markerLower.includes("answer:")) {
+    const parts = markerRaw
+      .split("|")
+      .map((p) => p.trim())
+      .filter(Boolean);
+
+    let answerMarker = "";
+    let note = "";
+
+    for (const p of parts) {
+      const low = p.toLowerCase();
+      if (low.startsWith("answer:")) {
+        answerMarker = p.slice(p.indexOf(":") + 1).trim();
+      } else if (low.startsWith("note:")) {
+        note = p.slice(p.indexOf(":") + 1).trim();
+      }
+    }
 
     return {
       rawInput,
@@ -154,16 +218,19 @@ function parseRawUnit(rawUnit) {
       hint: "",
       answerMarker,
       answerParts: splitAnswerToArray(answerMarker),
+      note, // <-- важно
     };
   }
 
+  // Otherwise: word with hint in brackets
   return {
     rawInput,
     item,
     type: "word",
-    hint: marker,
+    hint: markerRaw,
     answerMarker: "",
     answerParts: splitAnswerToArray(item),
+    note: "",
   };
 }
 
@@ -300,6 +367,7 @@ function buildLearnCardResponse(item) {
       translate: item.translate,
       meaning: item.meaning,
       meaningRu: item.meaningRu,
+      note: item.note || "",
       examples: item.examples,
       practicePreview: previewPractice
         ? {
@@ -328,6 +396,7 @@ function buildPracticeCardResponse(item, practiceIndex) {
       item: item.item,
       type: item.type,
       translate: item.translate,
+      note: item.note || "",
       practiceIndex,
       practice: {
         type: practice.type,
@@ -389,6 +458,41 @@ function buildLearningItemSchema(itemType) {
     },
     required: ["item", "translate", "type", "meaning", "meaningRu", "examples", "practice"],
   };
+}
+
+async function generateGrammarNote(phraseText, answerParts) {
+  const response = await openai.responses.create({
+    model: OPENAI_MODEL,
+    input: [
+      {
+        role: "user",
+        content: `You are an English grammar tutor.
+Given:
+- sentence: "${phraseText}"
+- target answer tokens: ${JSON.stringify(answerParts)}
+
+Return ONLY JSON:
+{ "note": "<short Russian note (1-2 sentences) explaining what grammar is practiced here. Simple words.>" }`,
+      },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "grammar_note",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: { note: { type: "string" } },
+          required: ["note"],
+        },
+      },
+    },
+  });
+
+  const raw = extractResponseText(response);
+  const data = JSON.parse(raw);
+  return String(data.note || "").trim();
 }
 async function resolveHint(item, hint) {
   if (!hint) return null;
@@ -691,14 +795,52 @@ app.post("/api/items/import", async (req, res) => {
         }
 
         const parsedUnit = parseRawUnit(rawUnit);
+        async function generateGrammarNote(phraseText, answerParts) {
+  const response = await openai.responses.create({
+    model: OPENAI_MODEL,
+    input: [
+      {
+        role: "user",
+        content: `You are an English grammar tutor.
+Given:
+- sentence: "${phraseText}"
+- target answer tokens: ${JSON.stringify(answerParts)}
+
+Return ONLY JSON:
+{ "note": "<short Russian note (1-2 sentences) explaining what grammar is practiced here. Simple words.>" }`,
+      },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "grammar_note",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: { note: { type: "string" } },
+          required: ["note"],
+        },
+      },
+    },
+  });
+
+  const raw = extractResponseText(response);
+  const data = JSON.parse(raw);
+  return String(data.note || "").trim();
+}
         const generated = await generateLearningDoc(parsedUnit);
 
+
         const saved = await LearningItem.create({
-          ...generated,
-          fsrsCard: createEmptyCard(),
-          due: new Date(),
-          introSeen: false,
+        ...generated,
+        sourceNote,
+        note,
+        fsrsCard: createEmptyCard(),
+        due: new Date(),
+        introSeen: false,
         });
+       
 
         results.push({
           rawInput: rawUnit,
