@@ -43,7 +43,6 @@ const practiceSchema = new mongoose.Schema(
   },
   { _id: false }
 );
-
 const learningItemSchema = new mongoose.Schema(
   {
     rawInput: { type: String, required: true, unique: true },
@@ -56,9 +55,11 @@ const learningItemSchema = new mongoose.Schema(
     item: { type: String, required: true },
     translate: { type: String, required: true },
     type: { type: String, enum: ["word", "phrase"], required: true },
+
     // phrase notes (optional)
     sourceNote: { type: String, default: "" }, // what user typed after note:
     note: { type: String, default: "" },       // final note shown in app
+
     meaning: { type: String, required: true },
     meaningRu: { type: String, required: true },
     examples: { type: [exampleSchema], default: [] },
@@ -80,6 +81,9 @@ const learningItemSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// IMPORTANT: index for schedule queries
+learningItemSchema.index({ due: 1, createdAt: 1 });
 
 const lessonSessionSchema = new mongoose.Schema(
   {
@@ -459,7 +463,6 @@ function buildLearningItemSchema(itemType) {
     required: ["item", "translate", "type", "meaning", "meaningRu", "examples", "practice"],
   };
 }
-
 async function generateGrammarNote(phraseText, answerParts) {
   const response = await openai.responses.create({
     model: OPENAI_MODEL,
@@ -795,52 +798,42 @@ app.post("/api/items/import", async (req, res) => {
         }
 
         const parsedUnit = parseRawUnit(rawUnit);
-        async function generateGrammarNote(phraseText, answerParts) {
-  const response = await openai.responses.create({
-    model: OPENAI_MODEL,
-    input: [
-      {
-        role: "user",
-        content: `You are an English grammar tutor.
-Given:
-- sentence: "${phraseText}"
-- target answer tokens: ${JSON.stringify(answerParts)}
 
-Return ONLY JSON:
-{ "note": "<short Russian note (1-2 sentences) explaining what grammar is practiced here. Simple words.>" }`,
-      },
-    ],
-    text: {
-      format: {
-        type: "json_schema",
-        name: "grammar_note",
-        strict: true,
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          properties: { note: { type: "string" } },
-          required: ["note"],
-        },
-      },
-    },
-  });
+        if (parsedUnit.type === "phrase" && (!parsedUnit.answerParts || parsedUnit.answerParts.length === 0)) {
+          results.push({
+            rawInput: rawUnit,
+            status: "error",
+            error: 'Phrase must include "answer: ..." inside brackets',
+          });
+          continue;
+        }
 
-  const raw = extractResponseText(response);
-  const data = JSON.parse(raw);
-  return String(data.note || "").trim();
-}
         const generated = await generateLearningDoc(parsedUnit);
 
+        // phrase notes
+        let sourceNote = "";
+        let note = "";
+
+        if (parsedUnit.type === "phrase") {
+          sourceNote = String(parsedUnit.note || "").trim();
+
+          if (!sourceNote) {
+            note = "";
+          } else if (sourceNote.toLowerCase() === "ai generate") {
+            note = await generateGrammarNote(parsedUnit.item, parsedUnit.answerParts);
+          } else {
+            note = sourceNote;
+          }
+        }
 
         const saved = await LearningItem.create({
-        ...generated,
-        sourceNote,
-        note,
-        fsrsCard: createEmptyCard(),
-        due: new Date(),
-        introSeen: false,
+          ...generated,
+          sourceNote,
+          note,
+          fsrsCard: createEmptyCard(),
+          due: new Date(),
+          introSeen: false,
         });
-       
 
         results.push({
           rawInput: rawUnit,
@@ -849,7 +842,7 @@ Return ONLY JSON:
           item: saved.item,
           type: saved.type,
         });
-             } catch (error) {
+      } catch (error) {
         console.error("IMPORT_ITEM_FAILED", {
           rawInput: rawUnit,
           error: error.message,
@@ -880,18 +873,30 @@ Return ONLY JSON:
 // List items so the frontend can inspect what is in DB
 app.get("/api/items", async (req, res) => {
   try {
-    const limit = Math.min(Number(req.query.limit || 100), 200);
-    const items = await LearningItem.find()
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .lean();
+    const limit = Math.min(Number(req.query.limit || 100), 500);
 
+    const sortMode = String(req.query.sort || "").toLowerCase(); // "" | "due"
+    const horizonMinutes = Math.min(Number(req.query.horizonMinutes || 0), 60 * 24 * 7); // max 7 days
+
+    const now = new Date();
+    const filter = {};
+
+    if (horizonMinutes > 0) {
+      const to = new Date(now.getTime() + horizonMinutes * 60 * 1000);
+      filter.due = { $lte: to };
+    }
+
+    const sort =
+      sortMode === "due"
+        ? { due: 1, createdAt: 1 }
+        : { createdAt: -1 };
+
+    const items = await LearningItem.find(filter).sort(sort).limit(limit).lean();
     res.json(items);
   } catch (error) {
     res.status(500).json({ error: error.message || "Failed to load items" });
   }
 });
-
 // Start a 5-minute lesson session
 app.post("/api/lessons/start", async (_req, res) => {
   try {
