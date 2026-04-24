@@ -78,12 +78,15 @@ const learningItemSchema = new mongoose.Schema(
     lastRating: { type: Number, default: null },
     lastHintCount: { type: Number, default: 0 },
     lastResult: { type: String, enum: ["correct", "wrong", null], default: null },
+    status: { type: String, enum: ["new", "learning", "review"], default: "new", index: true },
   },
   { timestamps: true }
 );
 
 // IMPORTANT: index for schedule queries
 learningItemSchema.index({ due: 1, createdAt: 1 });
+learningItemSchema.index({ status: 1, due: 1 });
+learningItemSchema.index({ status: 1, lastReviewedAt: 1 });
 
 const lessonSessionSchema = new mongoose.Schema(
   {
@@ -744,6 +747,7 @@ async function reviewAndReschedule(item, appRating, hintCount, isCorrect) {
   item.lastRating = appRating;
   item.lastHintCount = hintCount;
   item.lastResult = isCorrect ? "correct" : "wrong";
+  item.status = item.totalReviews >= 3 ? "review" : "learning";
 
   await item.save();
 
@@ -831,8 +835,9 @@ app.post("/api/items/import", async (req, res) => {
           sourceNote,
           note,
           fsrsCard: createEmptyCard(),
-          due: new Date(),
+          due: null,
           introSeen: false,
+          status: "new",
         });
 
         results.push({
