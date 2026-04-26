@@ -70,7 +70,8 @@ const learningItemSchema = new mongoose.Schema(
 
     // FSRS scheduling
     fsrsCard: { type: mongoose.Schema.Types.Mixed, default: () => createEmptyCard() },
-    due: { type: Date, default: () => new Date() },
+    
+    due: { type: Date, default: null },
 
     // analytics / debug
     totalReviews: { type: Number, default: 0 },
@@ -919,17 +920,129 @@ app.post("/api/lessons/start", async (_req, res) => {
     });
 
     const dueCount = await LearningItem.countDocuments({
+      status: { $in: ["learning", "review"] },
       due: { $lte: startedAt },
     });
+
+    const NEW_PER_DAY = Number(process.env.NEW_PER_DAY || 10);
+    const startOfDay = new Date(startedAt);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const newShownToday = await LearningItem.countDocuments({
+      status: "learning",
+      lastReviewedAt: { $gte: startOfDay },
+    });
+
+    const newAvailableTotal = await LearningItem.countDocuments({ status: "new" });
 
     res.json({
       lessonId: lesson._id,
       startedAt,
       endsAt,
       dueCount,
+      newShownToday,
+      newQuotaRemaining: Math.max(0, NEW_PER_DAY - newShownToday),
+      newAvailableTotal,
     });
   } catch (error) {
     res.status(500).json({ error: error.message || "Failed to start lesson" });
+  }
+});
+
+// Calculates notification fire times for the next 2 days.
+// iOS calls this on every app open and after every completed lesson,
+// then replaces ALL pending UNUserNotificationCenter requests with the result.
+// Settings are sent by the client on each request — not stored server-side.
+app.post("/api/schedule", async (req, res) => {
+  try {
+    const dayStart      = String(req.body?.dayStart      || "08:00");
+    const dayEnd        = String(req.body?.dayEnd        || "22:00");
+    const busyWindows   = Array.isArray(req.body?.busyWindows) ? req.body.busyWindows : [];
+    const minGapMinutes      = Math.max(10, Number(req.body?.minGapMinutes      || 10));
+    const minLessonGapMinutes = Math.max(10, Number(req.body?.minLessonGapMinutes || 10));
+
+    function toMinutes(hhmm) {
+      const [h, m] = String(hhmm).split(":").map(Number);
+      return (h || 0) * 60 + (m || 0);
+    }
+
+    const dayStartMin = toMinutes(dayStart);
+    const dayEndMin   = toMinutes(dayEnd);
+    const busy = busyWindows.map(w => ({ from: toMinutes(w.from), to: toMinutes(w.to) }));
+    const lastLesson = await LessonSession.findOne({ isFinished: true })
+      .sort({ updatedAt: -1 });
+    const lastLessonEndedAt = lastLesson?.updatedAt || new Date(0);
+
+    function getSlotsForDay(dayOffset) {
+      const base = new Date();
+      base.setDate(base.getDate() + dayOffset);
+      base.setSeconds(0, 0);
+
+      const slots = [];
+      let cursor = dayStartMin;
+
+      while (cursor < dayEndMin) {
+        const windowEnd = Math.min(cursor + minGapMinutes, dayEndMin);
+        const mid = Math.floor((cursor + windowEnd) / 2);
+        const blocked = busy.some(b => mid >= b.from && mid < b.to);
+
+        if (!blocked) {
+          const fireAt = new Date(base);
+          fireAt.setHours(Math.floor(mid / 60), mid % 60, 0, 0);
+          if (fireAt > new Date()) slots.push(fireAt);
+        }
+
+        cursor += minGapMinutes;
+      }
+
+      return slots;
+    }
+
+    const allSlots = [...getSlotsForDay(0), ...getSlotsForDay(1)];
+    if (!allSlots.length) return res.json({ notifications: [] });
+
+    const NEW_PER_DAY = Number(process.env.NEW_PER_DAY || 10);
+    const newAvailableTotal = await LearningItem.countDocuments({ status: "new" });
+
+    const notifications = (await Promise.all(
+      allSlots.map(async (fireAt) => {
+        const slotDayStart = new Date(fireAt);
+        slotDayStart.setHours(0, 0, 0, 0);
+
+        // Cards with Again rating due soon = high urgency
+        const [urgentCount, dueCount, newShownOnDay] = await Promise.all([
+          LearningItem.countDocuments({
+            status: { $in: ["learning", "review"] },
+            due: { $lte: fireAt },
+            lastRating: 1,
+          }),
+          LearningItem.countDocuments({
+            status: { $in: ["learning", "review"] },
+            due: { $lte: fireAt },
+          }),
+          LearningItem.countDocuments({
+            status: "learning",
+            lastReviewedAt: { $gte: slotDayStart, $lt: fireAt },
+          }),
+        ]);
+
+        
+        const minutesSinceLastLesson = (fireAt - lastLessonEndedAt) / 60000;
+        const lessonGapOk = minutesSinceLastLesson >= minLessonGapMinutes;
+
+        const newAvailable = lessonGapOk
+          ? Math.min(Math.max(0, NEW_PER_DAY - newShownOnDay), newAvailableTotal)
+          : 0;
+
+        if (dueCount === 0 && newAvailable === 0) return null;
+
+        return { fireAt, dueCount, urgentCount, newAvailable };
+      })
+    )).filter(Boolean);
+
+    res.json({ notifications });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Failed to build schedule" });
   }
 });
 
@@ -969,11 +1082,45 @@ app.get("/api/lessons/:lessonId/next", async (req, res) => {
     }
 
     const now = new Date();
+    const NEW_PER_DAY = Number(process.env.NEW_PER_DAY || 10);
 
-    const item = await LearningItem.findOne({
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const newShownToday = await LearningItem.countDocuments({
+      status: "learning",
+      lastReviewedAt: { $gte: startOfDay },
+    });
+
+    const canShowNew = newShownToday < NEW_PER_DAY;
+
+    // Сначала review-долг
+// Приоритет 1: недавно увиденные (introSeen в этой сессии) с рейтингом Again
+    let item = await LearningItem.findOne({
+      status: { $in: ["learning", "review"] },
       due: { $lte: now },
       _id: { $nin: lesson.seenItemIds },
-    }).sort({ due: 1, createdAt: 1 });
+      lastRating: 1,
+    }).sort({ due: 1 });
+
+    // Приоритет 2: все остальные просроченные
+    if (!item) {
+      item = await LearningItem.findOne({
+        status: { $in: ["learning", "review"] },
+        due: { $lte: now },
+        _id: { $nin: lesson.seenItemIds },
+      }).sort({ due: 1, createdAt: 1 });
+    }
+
+    // Если review нет и квота не исчерпана — берём новое слово
+    // Новые слова только если нет ни одной просроченной карточки вообще
+    
+if (!item && canShowNew) {
+      item = await LearningItem.findOne({
+        status: "new",
+        _id: { $nin: lesson.seenItemIds },
+      }).sort({ createdAt: 1 });
+    }
 
     if (!item) {
       lesson.isFinished = true;
@@ -987,6 +1134,13 @@ app.get("/api/lessons/:lessonId/next", async (req, res) => {
     }
 
     lesson.seenItemIds.push(item._id);
+
+    // Estimate remaining cards so iOS can schedule notifications early
+    const remainingInLesson = await LearningItem.countDocuments({
+      status: { $in: ["learning", "review"] },
+      due: { $lte: now },
+      _id: { $nin: lesson.seenItemIds },
+    });
     lesson.currentItemId = item._id;
 
     if (!item.introSeen) {
@@ -994,7 +1148,7 @@ app.get("/api/lessons/:lessonId/next", async (req, res) => {
       lesson.currentPracticeIndex = null;
       await lesson.save();
 
-      return res.json(buildLearnCardResponse(item));
+      return res.json({ ...buildLearnCardResponse(item), remainingInLesson });
     }
 
     const practiceIndex = pickRandomPracticeIndex(item);
@@ -1002,7 +1156,7 @@ app.get("/api/lessons/:lessonId/next", async (req, res) => {
     lesson.currentPracticeIndex = practiceIndex;
     await lesson.save();
 
-    return res.json(buildPracticeCardResponse(item, practiceIndex));
+    return res.json({ ...buildPracticeCardResponse(item, practiceIndex), remainingInLesson });
   } catch (error) {
     res.status(error.status || 500).json({
       error: error.message || "Failed to get next card",
