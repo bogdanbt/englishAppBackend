@@ -75,7 +75,6 @@ const learningItemSchema = new mongoose.Schema(
 
     // analytics / debug
     totalReviews: { type: Number, default: 0 },
-    consecutiveCorrect: { type: Number, default: 0 }, // верных ответов подряд без Again
     lastReviewedAt: { type: Date, default: null },
     lastRating: { type: Number, default: null },
     lastHintCount: { type: Number, default: 0 },
@@ -89,7 +88,6 @@ const learningItemSchema = new mongoose.Schema(
 learningItemSchema.index({ due: 1, createdAt: 1 });
 learningItemSchema.index({ status: 1, due: 1 });
 learningItemSchema.index({ status: 1, lastReviewedAt: 1 });
-learningItemSchema.index({ status: 1, due: 1, consecutiveCorrect: 1 });
 
 const lessonSessionSchema = new mongoose.Schema(
   {
@@ -111,19 +109,6 @@ const lessonSessionSchema = new mongoose.Schema(
       type: Number,
       default: null,
     },
-
-    // schedule settings saved at lesson start
-    dayEnd: { type: String, default: "22:00" },
-    busyWindows: { type: mongoose.Schema.Types.Mixed, default: [] },
-
-    // user-configurable lesson settings (saved at start, used throughout session)
-    lessonMinutes:             { type: Number, default: 5 },
-    newPerDay:                 { type: Number, default: 10 },
-    freeTimeThresholdMinutes:  { type: Number, default: 90 },
-    alreadyKnownDays:          { type: Number, default: 7 },
-
-    // карточек показано в этой сессии (для чередования due/new)
-    shownCount: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
@@ -750,59 +735,19 @@ Important:
     throw error;
   }
 }
-// Есть ли впереди >= requiredMinutes свободного времени (за вычетом busy windows)
-function hasFreeTimeAhead(now, dayEnd, busyWindows, requiredMinutes = 90) {
-  function toMinutes(hhmm) {
-    const [h, m] = String(hhmm || "22:00").split(":").map(Number);
-    return (h || 0) * 60 + (m || 0);
-  }
-  const dayEndMin = toMinutes(dayEnd);
-  const nowMin = now.getHours() * 60 + now.getMinutes();
-  const busy = (busyWindows || []).map(w => ({
-    from: toMinutes(w.from),
-    to: toMinutes(w.to),
-  }));
-
-  let freeMinutes = 0;
-  let cursor = nowMin;
-  while (cursor < dayEndMin && freeMinutes < requiredMinutes) {
-    const inBusy = busy.some(b => cursor >= b.from && cursor < b.to);
-    if (!inBusy) freeMinutes++;
-    cursor++;
-  }
-  return freeMinutes >= requiredMinutes;
-}
-
 async function reviewAndReschedule(item, appRating, hintCount, isCorrect) {
   const now = new Date();
   const currentCard = hydrateFsrsCard(item.fsrsCard);
   const result = scheduler.next(currentCard, now, toFsrsRating(appRating));
 
-  // Округляем due до начала дня для Good/Easy — точное время только для Again/Hard
-  let newDue = result.card.due;
-  if (appRating >= 3) {
-    const d = new Date(newDue);
-    d.setHours(0, 0, 0, 0);
-    newDue = d;
-  }
-
-  result.card.due = newDue;
   item.fsrsCard = result.card;
-  item.due = newDue;
+  item.due = result.card.due;
   item.introSeen = true;
   item.totalReviews += 1;
   item.lastReviewedAt = now;
   item.lastRating = appRating;
   item.lastHintCount = hintCount;
   item.lastResult = isCorrect ? "correct" : "wrong";
-
-  // consecutiveCorrect: сбрасываем при Again, иначе +1
-  if (appRating === 1) {
-    item.consecutiveCorrect = 0;
-  } else if (isCorrect) {
-    item.consecutiveCorrect = (item.consecutiveCorrect || 0) + 1;
-  }
-
   item.status = item.totalReviews >= 3 ? "review" : "learning";
 
   await item.save();
@@ -958,20 +903,11 @@ app.get("/api/items", async (req, res) => {
     res.status(500).json({ error: error.message || "Failed to load items" });
   }
 });
-// Start a lesson session — all timing settings come from the client
+// Start a 5-minute lesson session
 app.post("/api/lessons/start", async (req, res) => {
   try {
     const startedAt = new Date();
-
-    // All configurable settings come from iOS — server has no hardcoded defaults for these
-    const lessonMinutes            = Math.max(1, Number(req.body?.lessonMinutes)            || LESSON_MINUTES);
-    const newPerDay                = Math.max(0, Number(req.body?.newPerDay)                || Number(process.env.NEW_PER_DAY) || 10);
-    const freeTimeThresholdMinutes = Math.max(0, Number(req.body?.freeTimeThresholdMinutes) || 90);
-    const alreadyKnownDays         = Math.max(1, Number(req.body?.alreadyKnownDays)         || 7);
-    const dayEnd                   = String(req.body?.dayEnd    || "22:00");
-    const busyWindows              = Array.isArray(req.body?.busyWindows) ? req.body.busyWindows : [];
-
-    const endsAt = new Date(startedAt.getTime() + lessonMinutes * 60 * 1000);
+    const endsAt = new Date(startedAt.getTime() + LESSON_MINUTES * 60 * 1000);
 
     const lesson = await LessonSession.create({
       startedAt,
@@ -981,23 +917,14 @@ app.post("/api/lessons/start", async (req, res) => {
       currentItemId: null,
       currentMode: null,
       currentPracticeIndex: null,
-      dayEnd,
-      busyWindows,
-      lessonMinutes,
-      newPerDay,
-      freeTimeThresholdMinutes,
-      alreadyKnownDays,
-      shownCount: 0,
     });
-
-    const endOfToday = new Date(startedAt);
-    endOfToday.setHours(23, 59, 59, 999);
 
     const dueCount = await LearningItem.countDocuments({
       status: { $in: ["learning", "review"] },
-      due: { $lte: endOfToday },
+      due: { $lte: startedAt },
     });
 
+    const NEW_PER_DAY  = Number(req.body?.newPerDay) || Number(process.env.NEW_PER_DAY) || 10;
     const startOfDay = new Date(startedAt);
     startOfDay.setHours(0, 0, 0, 0);
 
@@ -1014,7 +941,7 @@ app.post("/api/lessons/start", async (req, res) => {
       endsAt,
       dueCount,
       newShownToday,
-      newQuotaRemaining: Math.max(0, newPerDay - newShownToday),
+      newQuotaRemaining: Math.max(0, NEW_PER_DAY - newShownToday),
       newAvailableTotal,
     });
   } catch (error) {
@@ -1031,14 +958,8 @@ app.post("/api/schedule", async (req, res) => {
     const dayStart      = String(req.body?.dayStart      || "08:00");
     const dayEnd        = String(req.body?.dayEnd        || "22:00");
     const busyWindows   = Array.isArray(req.body?.busyWindows) ? req.body.busyWindows : [];
-    const minGapMinutes           = Math.max(10, Number(req.body?.minGapMinutes           || 10));
-    const minLessonGapMinutes     = Math.max(10, Number(req.body?.minLessonGapMinutes     || 10));
-    const regularNotificationGap  = Math.max(20, Number(req.body?.regularNotificationGap  || 20));
-    const NEW_PER_DAY_SCHEDULE    = Math.max(0,  Number(req.body?.newPerDay               || 10));
-
-    // Срочные уведомления (Again-карточки) — пользовательский гэп
-    // Обычные уведомления — regularNotificationGap из настроек iOS
-    const REGULAR_GAP = regularNotificationGap;
+    const minGapMinutes      = Math.max(10, Number(req.body?.minGapMinutes      || 10));
+    const minLessonGapMinutes = Math.max(10, Number(req.body?.minLessonGapMinutes || 10));
 
     function toMinutes(hhmm) {
       const [h, m] = String(hhmm).split(":").map(Number);
@@ -1052,7 +973,7 @@ app.post("/api/schedule", async (req, res) => {
       .sort({ updatedAt: -1 });
     const lastLessonEndedAt = lastLesson?.updatedAt || new Date(0);
 
-    function getSlotsForDay(dayOffset, gapMinutes) {
+    function getSlotsForDay(dayOffset) {
       const base = new Date();
       base.setDate(base.getDate() + dayOffset);
       base.setSeconds(0, 0);
@@ -1061,7 +982,7 @@ app.post("/api/schedule", async (req, res) => {
       let cursor = dayStartMin;
 
       while (cursor < dayEndMin) {
-        const windowEnd = Math.min(cursor + gapMinutes, dayEndMin);
+        const windowEnd = Math.min(cursor + minGapMinutes, dayEndMin);
         const mid = Math.floor((cursor + windowEnd) / 2);
         const blocked = busy.some(b => mid >= b.from && mid < b.to);
 
@@ -1071,43 +992,33 @@ app.post("/api/schedule", async (req, res) => {
           if (fireAt > new Date()) slots.push(fireAt);
         }
 
-        cursor += gapMinutes;
+        cursor += minGapMinutes;
       }
 
       return slots;
     }
 
-    // Два набора слотов: срочные (частые) и обычные (реже)
-    const urgentSlots  = [...getSlotsForDay(0, minGapMinutes), ...getSlotsForDay(1, minGapMinutes)];
-    const regularSlots = [...getSlotsForDay(0, REGULAR_GAP),  ...getSlotsForDay(1, REGULAR_GAP)];
-
-    const allSlots = [...new Set([...urgentSlots, ...regularSlots]
-      .map(d => d.getTime()))]
-      .sort((a, b) => a - b)
-      .map(t => new Date(t));
-
+    const allSlots = [...getSlotsForDay(0), ...getSlotsForDay(1)];
     if (!allSlots.length) return res.json({ notifications: [] });
 
+    const NEW_PER_DAY = Number(process.env.NEW_PER_DAY || 10);
     const newAvailableTotal = await LearningItem.countDocuments({ status: "new" });
 
     const notifications = (await Promise.all(
       allSlots.map(async (fireAt) => {
         const slotDayStart = new Date(fireAt);
         slotDayStart.setHours(0, 0, 0, 0);
-        const slotEndOfDay = new Date(fireAt);
-        slotEndOfDay.setHours(23, 59, 59, 999);
 
+        // Cards with Again rating due soon = high urgency
         const [urgentCount, dueCount, newShownOnDay] = await Promise.all([
-          // Срочные: Again-карточки с точным due <= fireAt
           LearningItem.countDocuments({
             status: { $in: ["learning", "review"] },
             due: { $lte: fireAt },
             lastRating: 1,
           }),
-          // Обычные: все карточки готовые в этот день
           LearningItem.countDocuments({
             status: { $in: ["learning", "review"] },
-            due: { $lte: slotEndOfDay },
+            due: { $lte: fireAt },
           }),
           LearningItem.countDocuments({
             status: "learning",
@@ -1115,25 +1026,17 @@ app.post("/api/schedule", async (req, res) => {
           }),
         ]);
 
+        
         const minutesSinceLastLesson = (fireAt - lastLessonEndedAt) / 60000;
         const lessonGapOk = minutesSinceLastLesson >= minLessonGapMinutes;
 
         const newAvailable = lessonGapOk
-          ? Math.min(Math.max(0, NEW_PER_DAY_SCHEDULE - newShownOnDay), newAvailableTotal)
+          ? Math.min(Math.max(0, NEW_PER_DAY - newShownOnDay), newAvailableTotal)
           : 0;
 
-        // Пропускаем слот если нечего показывать
         if (dueCount === 0 && newAvailable === 0) return null;
 
-        // Пропускаем обычный слот (не срочный) если он слишком частый
-        // Срочные слоты пропускать нельзя — они нужны при малом гэпе
-        const isUrgent = urgentCount > 0;
-        if (!isUrgent && urgentSlots.some(s => s.getTime() === fireAt.getTime()) &&
-            !regularSlots.some(s => s.getTime() === fireAt.getTime())) {
-          return null;
-        }
-
-        return { fireAt, dueCount, urgentCount, newAvailable, isUrgent };
+        return { fireAt, dueCount, urgentCount, newAvailable };
       })
     )).filter(Boolean);
 
@@ -1179,12 +1082,7 @@ app.get("/api/lessons/:lessonId/next", async (req, res) => {
     }
 
     const now = new Date();
-    const endOfToday = new Date(now);
-    endOfToday.setHours(23, 59, 59, 999);
-
-    // Читаем настройки из сессии (сохранены при start)
-    const NEW_PER_DAY             = lesson.newPerDay                ?? 10;
-    const freeTimeThreshold       = lesson.freeTimeThresholdMinutes ?? 90;
+    const NEW_PER_DAY = Number(req.body?.newPerDay) || Number(process.env.NEW_PER_DAY) || 10;
 
     const startOfDay = new Date(now);
     startOfDay.setHours(0, 0, 0, 0);
@@ -1194,38 +1092,30 @@ app.get("/api/lessons/:lessonId/next", async (req, res) => {
       lastReviewedAt: { $gte: startOfDay },
     });
 
-    // Новые слова только если есть достаточно свободного времени впереди
-    const freeTimeOk = hasFreeTimeAhead(now, lesson.dayEnd || "22:00", lesson.busyWindows || [], freeTimeThreshold);
-    const canShowNew = newShownToday < NEW_PER_DAY && freeTimeOk;
+    const canShowNew = newShownToday < NEW_PER_DAY;
 
-    // Чередование: каждая 4-я карточка в сессии — новая (если canShowNew и нет срочных)
-    const shownCount = lesson.shownCount || 0;
-    const wantNew = canShowNew && shownCount > 0 && shownCount % 4 === 3;
+    // Сначала review-долг
+// Приоритет 1: недавно увиденные (introSeen в этой сессии) с рейтингом Again
+    let item = await LearningItem.findOne({
+      status: { $in: ["learning", "review"] },
+      due: { $lte: now },
+      _id: { $nin: lesson.seenItemIds },
+      lastRating: 1,
+    }).sort({ due: 1 });
 
-    let item = null;
-
-    // Приоритет 1: Again-карточки (due точное время — могут быть раньше endOfToday)
-    if (!wantNew) {
+    // Приоритет 2: все остальные просроченные
+    if (!item) {
       item = await LearningItem.findOne({
         status: { $in: ["learning", "review"] },
         due: { $lte: now },
-        lastRating: 1,
         _id: { $nin: lesson.seenItemIds },
-      }).sort({ due: 1 });
+      }).sort({ due: 1, createdAt: 1 });
     }
 
-    // Приоритет 2: обычные due сегодня — сортировка по хрупкости:
-    // сначала мало consecutiveCorrect (хрупкие), потом по due (свежее по кривой забывания)
-    if (!item && !wantNew) {
-      item = await LearningItem.findOne({
-        status: { $in: ["learning", "review"] },
-        due: { $lte: endOfToday },
-        _id: { $nin: lesson.seenItemIds },
-      }).sort({ consecutiveCorrect: 1, due: -1 });
-    }
-
-    // Приоритет 3: новое слово (при чередовании или когда due вообще нет)
-    if (!item && canShowNew) {
+    // Если review нет и квота не исчерпана — берём новое слово
+    // Новые слова только если нет ни одной просроченной карточки вообще
+    
+if (!item && canShowNew) {
       item = await LearningItem.findOne({
         status: "new",
         _id: { $nin: lesson.seenItemIds },
@@ -1244,12 +1134,11 @@ app.get("/api/lessons/:lessonId/next", async (req, res) => {
     }
 
     lesson.seenItemIds.push(item._id);
-    lesson.shownCount = (lesson.shownCount || 0) + 1;
 
     // Estimate remaining cards so iOS can schedule notifications early
     const remainingInLesson = await LearningItem.countDocuments({
       status: { $in: ["learning", "review"] },
-      due: { $lte: endOfToday },
+      due: { $lte: now },
       _id: { $nin: lesson.seenItemIds },
     });
     lesson.currentItemId = item._id;
@@ -1314,12 +1203,11 @@ app.post("/api/lessons/:lessonId/items/:itemId/complete-intro", async (req, res)
     let rating = 3;
 
     if (alreadyKnown) {
-      // "я уже знаю" => показать не раньше чем через alreadyKnownDays, rounded до начала дня
+      // KISS: “я уже знаю” => гарантированно показать не раньше чем через 7 дней
       const now = new Date();
-      const alreadyKnownDays = lesson.alreadyKnownDays ?? 7;
-      const minDue = new Date(now.getTime() + alreadyKnownDays * 24 * 60 * 60 * 1000);
-      minDue.setHours(0, 0, 0, 0);
+      const minDue = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
+      // Обновим FSRS как Easy, но due принудительно минимум +7 дней
       const currentCard = hydrateFsrsCard(item.fsrsCard);
       const result = scheduler.next(currentCard, now, Rating.Easy);
 
@@ -1330,7 +1218,6 @@ app.post("/api/lessons/:lessonId/items/:itemId/complete-intro", async (req, res)
 
       item.introSeen = true;
       item.totalReviews += 1;
-      item.consecutiveCorrect = (item.consecutiveCorrect || 0) + 1;
       item.lastReviewedAt = now;
       item.lastRating = 4;
       item.lastHintCount = 0;
